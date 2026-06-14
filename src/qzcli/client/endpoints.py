@@ -232,26 +232,31 @@ def get_task_metric(
     Returns ``time_seris_metric_groups`` (sic — the platform misspells it):
     ``[{resource_name, metric_type, group_name (pod), time_series: [{timestamp, data}]}]``.
     Timestamps are unix seconds; ``data`` is the rate (0..1 for *_usage_rate).
+
+    The endpoint only honours ONE metric per call — batching multiple
+    ``metric_types`` silently returns just the first. So we issue one request
+    per metric (like the web does) and merge the resulting groups.
     """
-    result = client.post_v2(
-        "train", "GetTaskMetric",
-        {
-            "metric_types": metric_types,
-            "filter": {
-                "logic_compute_group_id": logic_compute_group_id,
-                "task_type": task_type,
-                "task_id": task_id,
-            },
-            "time_range": {
-                "start_timestamp": start_timestamp,
-                "end_timestamp": end_timestamp,
-                "interval_second": interval_second,
-            },
-        },
-    )
-    if isinstance(result, dict) and isinstance(result.get("Result"), dict):
-        result = result["Result"]
-    return (result or {}).get("time_seris_metric_groups") or []
+    filt = {
+        "logic_compute_group_id": logic_compute_group_id,
+        "task_type": task_type,
+        "task_id": task_id,
+    }
+    time_range = {
+        "start_timestamp": start_timestamp,
+        "end_timestamp": end_timestamp,
+        "interval_second": interval_second,
+    }
+    groups: list[dict[str, Any]] = []
+    for metric in metric_types:
+        result = client.post_v2(
+            "train", "GetTaskMetric",
+            {"metric_types": [metric], "filter": filt, "time_range": time_range},
+        )
+        if isinstance(result, dict) and isinstance(result.get("Result"), dict):
+            result = result["Result"]
+        groups.extend((result or {}).get("time_seris_metric_groups") or [])
+    return groups
 
 
 def list_job_instances(client: Client, job_id: str) -> list[dict[str, Any]]:
