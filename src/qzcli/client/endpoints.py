@@ -39,6 +39,25 @@ def cluster_basic_info(client: Client, workspace_id: str) -> dict[str, Any]:
     ) or {}
 
 
+def validate_datasets(
+    client: Client, workspace_id: str, datasets: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """Validate dataset/version references against a workspace.
+
+    Endpoint: ``POST /api/v1/dataset/validate_dataset``. ``datasets`` is a list
+    of ``{"dataset_id", "version_id"}`` (empty version = default/latest).
+    Returns ``datasets_result``: per-dataset ``{dataset_id, version_id, success,
+    error_message, path}`` — ``path`` is the mount path on success; failures
+    distinguish missing dataset (2000) vs missing version (2001).
+    """
+    data = client.post_api(
+        "dataset/validate_dataset",
+        {"workspace_id": workspace_id, "datasets": datasets},
+        referer=_ws_referer(client, "distributedTraining", workspace_id),
+    ) or {}
+    return data.get("datasets_result") or []
+
+
 def list_resource_specs(
     client: Client,
     workspace_id: str,

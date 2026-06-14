@@ -92,6 +92,24 @@ def cmd_options(args) -> tuple[Any, Optional[list[str]]]:
     raise QzError(f"未知 options 目标: {args.options_target}", code="usage_error")
 
 
+def _parse_dataset_refs(specs: list[str]) -> list[dict[str, str]]:
+    """Parse ``dataset_id`` or ``dataset_id:version_id`` into validate payload."""
+    out = []
+    for s in specs:
+        dataset_id, _, version_id = s.partition(":")
+        out.append({"dataset_id": dataset_id, "version_id": version_id})
+    return out
+
+
+def cmd_dataset(args) -> tuple[Any, Optional[list[str]]]:
+    client = _client()
+    ws_id, _ = _resolved_ws(client, args.workspace)
+    results = endpoints.validate_datasets(
+        client, ws_id, _parse_dataset_refs(args.dataset)
+    )
+    return results, ["dataset_id", "version_id", "success", "path", "error_message"]
+
+
 def cmd_avail(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
     ws_id, _ = _resolved_ws(client, args.workspace)
@@ -130,6 +148,7 @@ def cmd_create(args) -> tuple[Any, Optional[list[str]]]:
         shm=args.shm,
         priority=args.priority,
         check_image=not args.no_image_check,
+        datasets=args.dataset or [],
     )
     if args.dry_run:
         return create_core.dry_run(client, req), None
@@ -245,6 +264,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="SOURCE_OFFICIAL / SOURCE_PUBLIC / ALL（默认）")
     o.set_defaults(func=cmd_options)
 
+    sp = sub.add_parser("dataset", help="数据集相关")
+    dsub = sp.add_subparsers(dest="dataset_target", required=True)
+    dv = dsub.add_parser("validate", help="校验数据集/版本是否合法，返回挂载 path")
+    dv.add_argument("-w", "--workspace", required=True)
+    dv.add_argument("--dataset", action="append", required=True,
+                    help="dataset_id 或 dataset_id:version_id，可重复")
+    dv.set_defaults(func=cmd_dataset)
+
     sp = sub.add_parser("avail", help="集群空闲：空卡 + 低优可抢占，按空闲排序")
     sp.add_argument("-w", "--workspace", required=True)
     sp.add_argument("-g", "--compute-group")
@@ -274,6 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--priority", type=int, default=create_core.DEFAULT_PRIORITY)
     sp.add_argument("--no-image-check", action="store_true",
                     help="跳过镜像存在性校验")
+    sp.add_argument("--dataset", action="append",
+                    help="挂载数据集 dataset_id 或 dataset_id:version_id，可重复（提交前自动校验）")
     sp.add_argument("--dry-run", action="store_true",
                     help="只校验+预览 payload，不提交")
     sp.set_defaults(func=cmd_create)

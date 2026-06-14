@@ -14,7 +14,7 @@ bypass the read.
 from __future__ import annotations
 
 import difflib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..client import endpoints
@@ -48,6 +48,7 @@ class CreateRequest:
     shm: Optional[int] = None  # None → default to the spec's memory (web behaviour)
     priority: int = DEFAULT_PRIORITY
     check_image: bool = True
+    datasets: list[str] = field(default_factory=list)  # "id" or "id:version" specs
 
 
 def _resource_spec_price(spec: Spec, compute_group_id: str) -> dict[str, Any]:
@@ -100,6 +101,43 @@ def _resolve_spec(
         hint="传 --quota-id <id>（候选见 candidates），或 --quota-id 加 --cpu/--gpu/--mem 自定义",
         candidates=[s.to_dict() for s in found],
     )
+
+
+def _resolve_datasets(
+    client: Client, workspace_id: str, specs: list[str]
+) -> list[dict[str, str]]:
+    """Validate dataset refs (read-before-write) and build the payload's
+    top-level ``dataset_info`` ``[{dataset_id, version_id, path}]``.
+
+    Raises with the platform's per-dataset reason on any failure (missing
+    dataset / missing version), so an agent knows exactly which ref is wrong.
+    """
+    if not specs:
+        return []
+    refs = []
+    for s in specs:
+        dataset_id, _, version_id = s.partition(":")
+        refs.append({"dataset_id": dataset_id, "version_id": version_id})
+    results = endpoints.validate_datasets(client, workspace_id, refs)
+    bad = [r for r in results if not r.get("success")]
+    if bad:
+        detail = "; ".join(
+            f"{r.get('dataset_id')}:{r.get('version_id') or '默认'} → {r.get('error_message')}"
+            for r in bad
+        )
+        raise QzError(
+            f"数据集校验失败: {detail}",
+            code="invalid_dataset",
+            hint="确认 dataset_id/version_id；可先 qzcli dataset validate 预检",
+        )
+    return [
+        {
+            "dataset_id": r.get("dataset_id", ""),
+            "version_id": r.get("version_id", ""),
+            "path": r.get("path", ""),
+        }
+        for r in results
+    ]
 
 
 def _check_image(client: Client, workspace_id: str, image: str):
@@ -208,6 +246,9 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
     # shm defaults to the spec's memory (matches the web platform default).
     shm = req.shm if req.shm is not None else spec.memory_gb
 
+    # datasets: validate refs (read-before-write) → top-level dataset_info.
+    dataset_info = _resolve_datasets(client, workspace_id, req.datasets)
+
     # 6. build payload. framework_config[0] needs BOTH the nested
     #    resource_spec_price AND the top-level cpu/mem_gi/gpu_count, else the
     #    platform rejects with "Cpu and Mem can't be empty.".
@@ -221,6 +262,7 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
         "command": req.command,
         "task_priority": req.priority,
         "auto_fault_tolerance": False,
+        "dataset_info": dataset_info,
         "framework_config": [
             {
                 "cpu": spec.cpu_count,
@@ -254,6 +296,7 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
         "instances": req.instances,
         "shm_gi": shm,
         "priority": req.priority,
+        "datasets": dataset_info,
     }
     return {"resolved": resolved, "payload": payload}
 

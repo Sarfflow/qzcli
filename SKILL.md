@@ -117,6 +117,15 @@ size, matching the web), `--priority` 1–10 (default 10), `--no-image-check`.
   quota; prefer choosing the right `quota_id`.
 - `--instances` is the **node count**; cards-per-node come from the spec's
   `gpu_count`.
+- `--dataset id[:version]` (repeatable) mounts datasets. Each is validated
+  before submit (read-before-write); an invalid one fails with `invalid_dataset`
+  and the platform's reason. Validated refs go into the job's top-level
+  `dataset_info` as `{dataset_id, version_id, path}`.
+
+### `dataset validate -w <ws> --dataset id[:version] ...`
+Check dataset/version refs without submitting anything.
+→ `data: [ {dataset_id, version_id, success, path, error_message} ]`
+`path` is the mount path on success; failures say missing dataset vs version.
 - A workspace can belong to **multiple projects**; when it does, `--project` is
   required (the error `ambiguous_project` lists the owning projects). `--project`
   must be a project that actually owns the workspace.

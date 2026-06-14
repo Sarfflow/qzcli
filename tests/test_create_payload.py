@@ -122,6 +122,42 @@ def test_explicit_project_must_own_the_space():
     assert ei.value.code == "invalid_project"
 
 
+_DATASET_OK = {
+    "datasets_result": [
+        {"dataset_id": "demo-ds", "version_id": "v1", "success": True,
+         "path": "storage/demo-ds/v1", "error_message": ""}
+    ]
+}
+
+
+def test_dataset_validated_into_payload():
+    c = _full_client()
+    c.responses["dataset/validate_dataset"] = _DATASET_OK
+    out = create_core.prepare(c, _req(datasets=["demo-ds:v1"]))
+    assert out["payload"]["dataset_info"] == [
+        {"dataset_id": "demo-ds", "version_id": "v1", "path": "storage/demo-ds/v1"}
+    ]
+
+
+def test_invalid_dataset_blocks_submit():
+    c = _full_client()
+    c.responses["dataset/validate_dataset"] = {
+        "datasets_result": [
+            {"dataset_id": "nope", "version_id": "", "success": False,
+             "path": "", "error_message": "code: 2000, message: 数据集不存在"}
+        ]
+    }
+    with pytest.raises(QzError) as ei:
+        create_core.prepare(c, _req(datasets=["nope"]))
+    assert ei.value.code == "invalid_dataset"
+
+
+def test_no_dataset_means_empty_dataset_info():
+    c = _full_client()
+    out = create_core.prepare(c, _req())
+    assert out["payload"]["dataset_info"] == []
+
+
 def test_submit_runs_prepare_then_posts():
     c = _full_client()
     c.responses["train_job/create"] = {"job_id": "job-new", "workspace_id": "ws-001"}
