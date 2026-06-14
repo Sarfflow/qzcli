@@ -170,6 +170,11 @@ def cmd_detail(args) -> tuple[Any, Optional[list[str]]]:
     return endpoints.job_detail(_client(), args.job_id), None
 
 
+def cmd_instances(args) -> tuple[Any, Optional[list[str]]]:
+    items = endpoints.list_job_instances(_client(), args.job_id)
+    return items, ["name", "instance_type", "node", "instance_status", "running_time_ms"]
+
+
 # --- argument parser ------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -262,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("detail", help="任务详情")
     sp.add_argument("job_id")
     sp.set_defaults(func=cmd_detail)
+
+    sp = sub.add_parser("instances", help="任务的实例/Pod 列表（真实 pod 名）")
+    sp.add_argument("job_id")
+    sp.set_defaults(func=cmd_instances)
 
     return p
 

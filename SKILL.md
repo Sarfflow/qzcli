@@ -126,8 +126,13 @@ size, matching the web), `--priority` 1–10 (default 10), `--no-image-check`.
 ### `ls -w <ws> [--running] [--limit N]`
 → `data: {total, jobs: [{job_id, name, status, workspace_id, project_id, logic_compute_group_id, created_at}]}`
 
+### `instances JOB_ID`
+→ `data: [ {name, instance_type, node, instance_status, created_at, started_at, finished_at, running_time_ms} ]`
+The job's real pods/instances. `name` is the actual pod name.
+
 ### `logs JOB_ID [--tail N]`
 → `data: {logs: [{message, pod_name, node, time, timestamp_ms, ...}], total}`
+Pod names are resolved from `instances` (not guessed).
 
 ### `stop JOB_ID`
 → `data: {stopped: JOB_ID, result: {...}}`

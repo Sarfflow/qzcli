@@ -209,22 +209,34 @@ def job_logs(
     return result if isinstance(result, dict) else {"logs": result}
 
 
+def list_job_instances(client: Client, job_id: str) -> list[dict[str, Any]]:
+    """A job's real instances/pods via v2 ``ListJobInstances``.
+
+    Returns ``items`` like ``{name, instance_type, node, instance_status,
+    created_at, started_at, finished_at, running_time_ms}``. ``name`` is the
+    actual pod name — authoritative, not guessed.
+    """
+    result = client.post_v2(
+        "train", "ListJobInstances",
+        {"job_id": job_id, "page_num": 1, "page_size": -1},
+    )
+    if isinstance(result, dict) and isinstance(result.get("Result"), dict):
+        result = result["Result"]
+    return (result or {}).get("items") or []
+
+
 def resolve_pod_names(
     client: Client, job_id: str, n_instances: Optional[int] = None
 ) -> list[str]:
-    """Pods follow ``{job_id}-worker-{i}``; infer count from detail if needed."""
-    if n_instances is None:
-        try:
-            d = job_detail(client, job_id)
-            fc = d.get("framework_config")
-            if isinstance(fc, list) and fc and isinstance(fc[0], dict):
-                n_instances = fc[0].get("instance_count")
-            if not n_instances:
-                n_instances = (
-                    d.get("instance_count") or d.get("instances") or d.get("replica_count")
-                )
-        except Exception:
-            n_instances = None
+    """Real pod names from ListJobInstances; fall back to the naming convention
+    only if the instance list is unavailable (e.g. job not yet scheduled)."""
+    try:
+        names = [i.get("name") for i in list_job_instances(client, job_id) if i.get("name")]
+        if names:
+            return names
+    except Exception:
+        pass
+    # Fallback: the platform names pods {job_id}-worker-{i}.
     if not n_instances or n_instances < 1:
         n_instances = 1
     return [f"{job_id}-worker-{i}" for i in range(int(n_instances))]
