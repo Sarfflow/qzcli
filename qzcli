@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Self-locating launcher so qzcli can be invoked as <skill-dir>/qzcli from
+# anywhere, regardless of the current working directory. Runs the project's
+# console script via uv (first run auto-syncs deps).
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec uv run --project "$DIR" qzcli "$@"

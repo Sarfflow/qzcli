@@ -1,0 +1,22 @@
+[project]
+name = "qzcli"
+version = "0.1.0"
+description = "Agent-first CLI for the 启智 platform (qz.sii.edu.cn), built on the reverse-engineered web API."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "PySocks>=1.7.1",
+]
+
+[project.scripts]
+qzcli = "qzcli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
