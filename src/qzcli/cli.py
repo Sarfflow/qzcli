@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from typing import Any, Optional
 
 from . import __version__, config, output
@@ -175,6 +176,39 @@ def cmd_instances(args) -> tuple[Any, Optional[list[str]]]:
     return items, ["name", "instance_type", "node", "instance_status", "running_time_ms"]
 
 
+def cmd_metrics(args) -> tuple[Any, Optional[list[str]]]:
+    client = _client()
+    detail = endpoints.job_detail(client, args.job_id)
+    lcg = detail.get("logic_compute_group_id", "")
+    if not lcg:
+        raise QzError(
+            f"无法获取任务 {args.job_id} 的计算组（任务可能不存在）",
+            code="invalid_job", hint="先用 qzcli ls -w <ws> 确认 job_id",
+        )
+    end = int(time.time())
+    start = end - args.minutes * 60
+    metrics = args.metric or ["gpu_usage_rate", "gpu_memory_usage_rate"]
+    groups = endpoints.get_task_metric(
+        client, logic_compute_group_id=lcg, task_id=args.job_id,
+        metric_types=metrics, start_timestamp=start, end_timestamp=end,
+        interval_second=args.interval, task_type=args.task_type,
+    )
+    summary = []
+    for g in groups:
+        vals = [p.get("data", 0) for p in (g.get("time_series") or [])]
+        summary.append({
+            "group_name": g.get("group_name"),
+            "metric_type": g.get("metric_type"),
+            "points": len(vals),
+            "last": vals[-1] if vals else None,
+            "avg": round(sum(vals) / len(vals), 4) if vals else None,
+            "max": max(vals) if vals else None,
+        })
+    if args.table:
+        return summary, ["group_name", "metric_type", "last", "avg", "max", "points"]
+    return {"window_minutes": args.minutes, "summary": summary, "groups": groups}, None
+
+
 # --- argument parser ------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -271,6 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("instances", help="任务的实例/Pod 列表（真实 pod 名）")
     sp.add_argument("job_id")
     sp.set_defaults(func=cmd_instances)
+
+    sp = sub.add_parser("metrics", help="任务资源利用率时序（默认 GPU+显存，判断是否在用卡）")
+    sp.add_argument("job_id")
+    sp.add_argument("--minutes", type=int, default=30, help="回看时间窗（分钟，默认 30）")
+    sp.add_argument("--interval", type=int, default=60, help="采样间隔秒（默认 60）")
+    sp.add_argument("--metric", action="append",
+                    help=f"指标，可重复。可选: {', '.join(endpoints.METRIC_TYPES)}")
+    sp.add_argument("--task-type", dest="task_type", default="distributed_training")
+    sp.set_defaults(func=cmd_metrics)
 
     return p
 

@@ -209,6 +209,51 @@ def job_logs(
     return result if isinstance(result, dict) else {"logs": result}
 
 
+METRIC_TYPES = [
+    "gpu_usage_rate", "gpu_memory_usage_rate", "cpu_usage_rate", "memory_usage_rate",
+    "disk_io_read", "disk_io_write", "network_io_read", "network_io_write",
+    "network_storage_io_read", "network_storage_io_write",
+]
+
+
+def get_task_metric(
+    client: Client,
+    *,
+    logic_compute_group_id: str,
+    task_id: str,
+    metric_types: list[str],
+    start_timestamp: int,
+    end_timestamp: int,
+    interval_second: int = 60,
+    task_type: str = "distributed_training",
+) -> list[dict[str, Any]]:
+    """Per-instance resource time series via v2 ``GetTaskMetric``.
+
+    Returns ``time_seris_metric_groups`` (sic — the platform misspells it):
+    ``[{resource_name, metric_type, group_name (pod), time_series: [{timestamp, data}]}]``.
+    Timestamps are unix seconds; ``data`` is the rate (0..1 for *_usage_rate).
+    """
+    result = client.post_v2(
+        "train", "GetTaskMetric",
+        {
+            "metric_types": metric_types,
+            "filter": {
+                "logic_compute_group_id": logic_compute_group_id,
+                "task_type": task_type,
+                "task_id": task_id,
+            },
+            "time_range": {
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
+                "interval_second": interval_second,
+            },
+        },
+    )
+    if isinstance(result, dict) and isinstance(result.get("Result"), dict):
+        result = result["Result"]
+    return (result or {}).get("time_seris_metric_groups") or []
+
+
 def list_job_instances(client: Client, job_id: str) -> list[dict[str, Any]]:
     """A job's real instances/pods via v2 ``ListJobInstances``.
 

@@ -134,6 +134,15 @@ The job's real pods/instances. `name` is the actual pod name.
 → `data: {logs: [{message, pod_name, node, time, timestamp_ms, ...}], total}`
 Pod names are resolved from `instances` (not guessed).
 
+### `metrics JOB_ID [--minutes N] [--interval S] [--metric M ...]`
+Per-instance resource utilization over time — use to check a *running* job is
+actually using its GPUs (or is stuck/idle). Default metrics: `gpu_usage_rate`,
+`gpu_memory_usage_rate`; available: gpu_usage_rate, gpu_memory_usage_rate,
+cpu_usage_rate, memory_usage_rate, disk_io_read/write, network_io_read/write,
+network_storage_io_read/write. Default window is the last 30 min.
+→ `data: {window_minutes, summary: [{group_name (pod), metric_type, last, avg, max, points}], groups: [{metric_type, group_name, time_series: [{timestamp, data}]}]}`
+Rates are 0..1. A running GPU job with `gpu_usage_rate` near 0 is likely stuck.
+
 ### `stop JOB_ID`
 → `data: {stopped: JOB_ID, result: {...}}`
 
