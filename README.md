@@ -14,9 +14,9 @@ and it's ready to use.
 1. Clone this repo into the user's skills directory as `qzcli`:
    ```bash
    # user-level (all projects):
-   git clone <REPO_URL> ~/.claude/skills/qzcli
+   git clone https://github.com/Sarfflow/qzcli.git ~/.claude/skills/qzcli
    # or project-level (this project only):
-   git clone <REPO_URL> .claude/skills/qzcli
+   git clone https://github.com/Sarfflow/qzcli.git .claude/skills/qzcli
    ```
 2. Prepare the environment once (installs deps into a local venv):
    ```bash
