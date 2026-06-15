@@ -54,7 +54,7 @@ def _print_table(data: Any, columns: Optional[Sequence[str]]) -> None:
         rows = data
     elif isinstance(data, dict):
         # common shapes: {"items": [...]}, {"jobs": [...]}, single record
-        for key in ("items", "jobs", "specs", "compute_groups", "images", "projects", "nodes"):
+        for key in ("items", "jobs", "specs", "compute_groups", "images", "projects", "nodes", "rooms"):
             if isinstance(data.get(key), list):
                 rows = data[key]
                 break

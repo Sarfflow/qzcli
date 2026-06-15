@@ -38,11 +38,21 @@ Always read your way to valid parameters before creating a job:
 
 1. **`login`** — establish a CAS session cookie (saved to `~/.qzcli/`).
 2. **`projects`** — see the project→space hierarchy; pick a workspace (`ws-...`).
-3. **`options compute-groups -w <ws>`** — pick a compute group (`lcg-...`).
-4. **`options specs -w <ws> -g <lcg>`** — pick a spec (`quota_id`) with its cpu/gpu/mem.
-5. **`options images -w <ws>`** — pick an image `address`.
-6. **`create --dry-run ...`** — validate everything and preview the payload.
-7. **`create ...`** — submit (it re-runs the dry-run internally first).
+3. **`rooms -w <ws>`** — see which 机房 (`lcg-...`) is emptiest *before* picking
+   one. Rank by free cards; **low-priority (preemptible) cards count as free**
+   because a job with `priority > 3` evicts them — so `effective_free`
+   (`gpu_free + low_priority_preemptible`) is the real headroom, the same thing
+   you'd eyeball per-node on the web. Prefer the 机房 with the most; for the spec
+   you want, confirm there's room for `instances × gpu_count` cards.
+4. **`options compute-groups -w <ws>`** — confirm the compute group (`lcg-...`)
+   id you picked in step 3 (or list them if you skipped `rooms`).
+5. **`options specs -w <ws> -g <lcg>`** — pick a spec (`quota_id`) with its cpu/gpu/mem.
+6. **`options images -w <ws>`** — pick an image `address`.
+7. **`create --dry-run ...`** — validate everything and preview the payload.
+8. **`create ...`** — submit (it re-runs the dry-run internally first).
+
+Optionally drill into one 机房's nodes with `avail -w <ws> -g <lcg>` to see which
+individual nodes have the most free/preemptible cards.
 
 When a selection is wrong or missing, the error's `candidates` array lists the
 legal choices at that level. Read it, pick one, retry. Never invent ids.
@@ -61,8 +71,8 @@ your job as the agent. In particular:
   a spec, look at recent jobs' compute group / size. Then pass your choice
   explicitly via `--project` / `--quota-id`. The tool deliberately does not read
   history to auto-fill anything.
-- **Picking the target cluster/node** from `avail` is yours; the tool ranks by
-  `effective_free` but submits only what you tell it.
+- **Picking the target 机房/node** from `rooms` / `avail` is yours; the tool ranks
+  by `effective_free` (idle + preemptible cards) but submits only what you tell it.
 
 So: the tool surfaces facts and legal candidates; you make the decisions and
 pass them in explicitly.
@@ -103,6 +113,19 @@ gpu_type, gpu_total, gpu_free, gpu_used, low_priority_preemptible,
 effective_free, status}]}` — nodes are sorted by `effective_free` (=
 `gpu_free + low_priority_preemptible`). Submit higher-priority to evict the
 preemptible ones. Tasks with `priority <= N` (default 3) count as low-priority.
+Pages through the whole fleet (not just the first 200 nodes).
+
+### `rooms -w <ws> [--low-priority-threshold N]`
+"Which 机房 is emptiest" — per-机房 (logic compute group) GPU rollup, ranked
+roomiest-first. Each named 机房 in the UI is an `lcg-`, and a job submission
+targets one, so this is the unit you actually pick from.
+→ `data: {low_priority_threshold, n_rooms, rooms: [{room (lcg name), lcg_id,
+gpu_type, cluster, n_nodes, n_nodes_ready, gpu_total, gpu_free, gpu_used,
+low_priority_preemptible, effective_free}]}` — sorted by `gpu_free`, then
+`effective_free`, then `gpu_total` (most idle cards, then evictable headroom,
+then largest fleet). 机房 share physical nodes, so `gpu_total` overlaps across
+rows and `gpu_free` can be **negative** (the 机房 is oversubscribed — rely on
+`effective_free` there). Use `avail -g <lcg>` to drill into one 机房's nodes.
 
 ### `create --dry-run | create  (required: --name -w -g --image --cmd)`
 Options: `--project`, `--quota-id`, `--cpu`, `--gpu`, `--mem`, `--framework`

@@ -129,6 +129,20 @@ def cmd_avail(args) -> tuple[Any, Optional[list[str]]]:
     return data, None
 
 
+def cmd_rooms(args) -> tuple[Any, Optional[list[str]]]:
+    client = _client()
+    ws_id, _ = _resolved_ws(client, args.workspace)
+    data = avail_core.rooms_availability(
+        client, ws_id, low_priority_threshold=args.low_priority_threshold,
+    )
+    if args.table:
+        return data["rooms"], [
+            "room", "gpu_type", "cluster", "n_nodes", "n_nodes_ready",
+            "gpu_total", "gpu_free", "low_priority_preemptible", "effective_free",
+        ]
+    return data, None
+
+
 def cmd_create(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
     req = create_core.CreateRequest(
@@ -279,6 +293,13 @@ def build_parser() -> argparse.ArgumentParser:
                     default=avail_core.LOW_PRIORITY_THRESHOLD,
                     help=f"优先级 <= 此值视为低优可抢占（默认 {avail_core.LOW_PRIORITY_THRESHOLD}）")
     sp.set_defaults(func=cmd_avail)
+
+    sp = sub.add_parser("rooms", help="按机房(lcg)聚合空闲卡，最空闲优先排序")
+    sp.add_argument("-w", "--workspace", required=True)
+    sp.add_argument("--low-priority-threshold", type=int,
+                    default=avail_core.LOW_PRIORITY_THRESHOLD,
+                    help=f"优先级 <= 此值视为低优可抢占（默认 {avail_core.LOW_PRIORITY_THRESHOLD}）")
+    sp.set_defaults(func=cmd_rooms)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")
     sp.add_argument("--name", required=True)
