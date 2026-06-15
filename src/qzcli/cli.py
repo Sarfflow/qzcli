@@ -120,6 +120,8 @@ def cmd_avail(args) -> tuple[Any, Optional[list[str]]]:
         client, ws_id,
         logic_compute_group_id=lcg_id,
         low_priority_threshold=args.low_priority_threshold,
+        include_all=args.all,
+        top=None if args.top == 0 else args.top,
     )
     if args.table:
         return data["by_gpu_type"], [
@@ -292,6 +294,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--low-priority-threshold", type=int,
                     default=avail_core.LOW_PRIORITY_THRESHOLD,
                     help=f"优先级 <= 此值视为低优可抢占（默认 {avail_core.LOW_PRIORITY_THRESHOLD}）")
+    sp.add_argument("--all", action="store_true",
+                    help="返回全部节点（默认只列最空闲的少数几台可用节点）")
+    sp.add_argument("--top", type=int, default=avail_core.DEFAULT_TOP_NODES,
+                    help=f"最多列出 N 个节点（按 effective_free 降序；默认 {avail_core.DEFAULT_TOP_NODES}，传 0 表示全部可调度）")
     sp.set_defaults(func=cmd_avail)
 
     sp = sub.add_parser("rooms", help="按机房(lcg)聚合空闲卡，最空闲优先排序")

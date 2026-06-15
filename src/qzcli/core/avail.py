@@ -23,6 +23,9 @@ from ..client.http import Client
 # Matches the platform's convention used in the web overview.
 LOW_PRIORITY_THRESHOLD = 3
 
+# Default per-node list size for `avail` — you only need the emptiest few.
+DEFAULT_TOP_NODES = 10
+
 
 def _num(d: dict[str, Any], key: str) -> float:
     v = (d or {}).get(key)
@@ -87,7 +90,19 @@ def cluster_availability(
     *,
     logic_compute_group_id: Optional[str] = None,
     low_priority_threshold: int = LOW_PRIORITY_THRESHOLD,
+    include_all: bool = False,
+    top: Optional[int] = DEFAULT_TOP_NODES,
 ) -> dict[str, Any]:
+    """Where a job can land. ``by_gpu_type`` always covers the whole fleet.
+
+    The cluster schedules jobs itself, so the per-node list is usually not
+    needed — and the fleet is hundreds of physical nodes. By default ``nodes``
+    is the emptiest few schedulable nodes with spare capacity (``effective_free
+    > 0``, ``Ready``), capped at ``top``; that's enough to confirm a job's nodes
+    exist (a 16-card job needs two free 8-card nodes). ``include_all`` returns
+    every node (and ignores ``top``); ``top=None`` keeps all schedulable ones.
+    ``n_nodes`` is always the true fleet size; ``n_nodes_shown`` the list size.
+    """
     nodes_raw = _fetch_all_nodes(
         client, workspace_id, logic_compute_group_id=logic_compute_group_id,
     )
@@ -126,6 +141,17 @@ def cluster_availability(
 
     nodes.sort(key=lambda x: (x["effective_free"], x["gpu_free"]), reverse=True)
 
+    n_total = len(nodes)
+    if not include_all:
+        # The scheduler places jobs itself; you rarely need the node list, and
+        # when you do you only need the emptiest few (a 16-card job = 2 free
+        # 8-card nodes). So default to schedulable nodes with spare capacity,
+        # capped at `top`. `include_all` returns every node (ignores `top`).
+        nodes = [n for n in nodes
+                 if n["effective_free"] > 0 and n["status"] == "Ready"]
+        if top is not None:
+            nodes = nodes[:top]
+
     by_gpu_type = [
         {
             "gpu_type": gt,
@@ -141,7 +167,8 @@ def cluster_availability(
 
     return {
         "low_priority_threshold": low_priority_threshold,
-        "n_nodes": len(nodes),
+        "n_nodes": n_total,
+        "n_nodes_shown": len(nodes),
         "by_gpu_type": by_gpu_type,
         "nodes": nodes,
     }

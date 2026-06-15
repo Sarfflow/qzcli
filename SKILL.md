@@ -51,8 +51,11 @@ Always read your way to valid parameters before creating a job:
 7. **`create --dry-run ...`** — validate everything and preview the payload.
 8. **`create ...`** — submit (it re-runs the dry-run internally first).
 
-Optionally drill into one 机房's nodes with `avail -w <ws> -g <lcg>` to see which
-individual nodes have the most free/preemptible cards.
+You normally **don't** pick individual nodes — the cluster scheduler places the
+job. `rooms` (capacity per 机房) is the only availability check the submit flow
+needs. If you do want to eyeball nodes, `avail -w <ws> -g <lcg>` lists just the
+emptiest few schedulable ones (default `--top 10`), enough to confirm a job's
+nodes exist (a 16-card job needs two free 8-card nodes).
 
 When a selection is wrong or missing, the error's `candidates` array lists the
 legal choices at that level. Read it, pick one, retry. Never invent ids.
@@ -105,15 +108,22 @@ requires; `gpu_type_simple` (e.g. `H100`) is for display. Pick a `quota_id`.
 → `data: [ {address, name, image_id, source, visibility, creator} ]`
 Use `address` as the `--image` value.
 
-### `avail -w <ws> [-g <lcg>] [--low-priority-threshold N]`
+### `avail -w <ws> [-g <lcg>] [--low-priority-threshold N] [--all] [--top N]`
 Where can a job land — combines idle cards with low-priority (preemptible) ones.
-→ `data: {low_priority_threshold, n_nodes, by_gpu_type: [{gpu_type, n_nodes,
-gpu_total, gpu_free, low_priority_preemptible, effective_free}], nodes: [{name,
-gpu_type, gpu_total, gpu_free, gpu_used, low_priority_preemptible,
-effective_free, status}]}` — nodes are sorted by `effective_free` (=
-`gpu_free + low_priority_preemptible`). Submit higher-priority to evict the
-preemptible ones. Tasks with `priority <= N` (default 3) count as low-priority.
-Pages through the whole fleet (not just the first 200 nodes).
+`nodes` are **physical GPU machines** (e.g. `qb-prod-gpu001`, 8 cards each).
+→ `data: {low_priority_threshold, n_nodes, n_nodes_shown, by_gpu_type:
+[{gpu_type, n_nodes, gpu_total, gpu_free, low_priority_preemptible,
+effective_free}], nodes: [{name, gpu_type, gpu_total, gpu_free, gpu_used,
+low_priority_preemptible, effective_free, status}]}` — nodes sorted by
+`effective_free` (= `gpu_free + low_priority_preemptible`). Submit higher-priority
+to evict the preemptible ones. Tasks with `priority <= N` (default 3) count as
+low-priority. `by_gpu_type` covers the **whole fleet** (paged in full, not just
+the first 200 nodes). The scheduler places jobs itself, so you rarely need the
+node list; by default it is just the **emptiest few schedulable nodes**
+(`effective_free > 0`, `Ready`, capped at `--top 10`) — `n_nodes` is the true
+total, `n_nodes_shown` the list size. `--top N` changes the cap (`--top 0` = all
+schedulable), `--all` dumps every node (large — tens of thousands of tokens).
+For submission, prefer the `rooms` overview (~500 tokens) over the node list.
 
 ### `rooms -w <ws> [--low-priority-threshold N]`
 "Which 机房 is emptiest" — per-机房 (logic compute group) GPU rollup, ranked
