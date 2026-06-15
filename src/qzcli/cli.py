@@ -37,6 +37,65 @@ def _resolved_ws(client: Client, workspace: str) -> tuple[str, str]:
     return space.id, space.name
 
 
+def _require_job(client: Client, job_id: str) -> dict[str, Any]:
+    """Verify a job exists, returning its detail; else a clean invalid_job error.
+
+    The read-side commands (logs/instances/metrics/events/detail) otherwise fail
+    unhelpfully on a bad/typo'd id — `train_job/detail` returns a generic
+    ``参数错误`` and the v2 log/instance paths return empty/blob with ok:true.
+    """
+    try:
+        detail = endpoints.job_detail(client, job_id)
+    except QzError as e:
+        if e.code in ("api_error", "bad_response"):
+            raise QzError(
+                f"任务 {job_id} 不存在或无权访问（平台: {e.message}）",
+                code="invalid_job",
+                hint="用 qzcli ls -w <ws> 查看合法 job_id",
+            ) from e
+        raise
+    if not detail:
+        raise QzError(
+            f"任务 {job_id} 不存在或无权访问",
+            code="invalid_job",
+            hint="用 qzcli ls -w <ws> 查看合法 job_id",
+        )
+    return detail
+
+
+def _condense_events(events: list[dict], *, tail: Optional[int] = None) -> list[dict]:
+    """Newest-first, with identical repeated events collapsed to a count.
+
+    k8s emits the same reason/message many times (gang scheduling, restarts);
+    raw oldest-first output buries the current state under startup churn.
+    """
+    grouped: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for e in events:
+        key = (e.get("type"), e.get("reason"), e.get("message"),
+               e.get("from"), e.get("object_id"))
+        g = grouped.get(key)
+        if g is None:
+            g = {
+                "type": e.get("type"), "reason": e.get("reason"),
+                "message": e.get("message"), "from": e.get("from"),
+                "object_type": e.get("object_type"), "object_id": e.get("object_id"),
+                "count": 0,
+                "first_timestamp": e.get("first_timestamp"),
+                "last_timestamp": e.get("last_timestamp"),
+            }
+            grouped[key] = g
+            order.append(key)
+        g["count"] += 1
+        if (e.get("first_timestamp") or "") < (g["first_timestamp"] or "9" * 20):
+            g["first_timestamp"] = e.get("first_timestamp")
+        if (e.get("last_timestamp") or "") > (g["last_timestamp"] or ""):
+            g["last_timestamp"] = e.get("last_timestamp")
+    out = [grouped[k] for k in order]
+    out.sort(key=lambda g: g.get("last_timestamp") or "", reverse=True)
+    return out[:tail] if tail else out
+
+
 # --- command handlers (return data, optional table columns) ---------------
 
 def cmd_login(args) -> tuple[Any, Optional[list[str]]]:
@@ -87,8 +146,21 @@ def cmd_options(args) -> tuple[Any, Optional[list[str]]]:
         ]
     if args.options_target == "images":
         ws_id, _ = _resolved_ws(client, args.workspace)
+        sources = ["ALL", "SOURCE_OFFICIAL", "SOURCE_PUBLIC", "SOURCE_PRIVATE"]
+        if args.source not in sources:
+            raise QzError(
+                f"--source '{args.source}' 非法",
+                code="invalid_argument",
+                hint=f"用其中之一: {', '.join(sources)}",
+                candidates=sources,
+            )
         images = options_core.images(client, ws_id, source=args.source)
-        return [im.to_dict() for im in images], ["address", "source", "visibility"]
+        rows = [im.to_dict() for im in images]
+        if not args.verbose:
+            # `creator` is a heavy nested object; `address` is all create needs.
+            for r in rows:
+                r.pop("creator", None)
+        return rows, ["address", "source", "visibility"]
     raise QzError(f"未知 options 目标: {args.options_target}", code="usage_error")
 
 
@@ -124,11 +196,33 @@ def cmd_avail(args) -> tuple[Any, Optional[list[str]]]:
         top=None if args.top == 0 else args.top,
     )
     if args.table:
-        return data["by_gpu_type"], [
-            "gpu_type", "n_nodes", "gpu_total", "gpu_free",
-            "low_priority_preemptible", "effective_free",
+        # Per-node rows are the reason to call avail; the by_gpu_type summary is
+        # still in the JSON view (and `rooms` is the aggregate table).
+        return data["nodes"], [
+            "name", "gpu_type", "gpu_total", "gpu_free", "gpu_used",
+            "low_priority_preemptible", "effective_free", "status",
         ]
     return data, None
+
+
+def _parse_fit(spec: Optional[str]) -> Optional[tuple[int, int]]:
+    """Parse a placement requirement ``IxC`` (instances × cards/node) or ``C``."""
+    if not spec:
+        return None
+    s = spec.lower().replace("×", "x")
+    try:
+        inst, _, cards = s.partition("x")
+        instances = int(inst) if cards else 1
+        per = int(cards or inst)
+        if instances < 1 or per < 1:
+            raise ValueError
+        return instances, per
+    except ValueError:
+        raise QzError(
+            f"--fit '{spec}' 格式错误",
+            code="invalid_argument",
+            hint="用 IxC（节点数x每节点卡数，如 2x8）或单个 C（如 8）",
+        )
 
 
 def cmd_rooms(args) -> tuple[Any, Optional[list[str]]]:
@@ -136,12 +230,17 @@ def cmd_rooms(args) -> tuple[Any, Optional[list[str]]]:
     ws_id, _ = _resolved_ws(client, args.workspace)
     data = avail_core.rooms_availability(
         client, ws_id, low_priority_threshold=args.low_priority_threshold,
+        fit=_parse_fit(args.fit),
     )
     if args.table:
-        return data["rooms"], [
-            "room", "gpu_type", "cluster", "n_nodes", "n_nodes_ready",
+        cols = [
+            "room", "lcg_id", "gpu_type", "cluster", "n_nodes_ready",
             "gpu_total", "gpu_free", "low_priority_preemptible", "effective_free",
+            "max_free_on_single_node", "nodes_full_free",
         ]
+        if args.fit:
+            cols += ["fit_nodes_idle", "fit_nodes_effective", "fits"]
+        return data["rooms"], cols
     return data, None
 
 
@@ -185,7 +284,19 @@ def cmd_ls(args) -> tuple[Any, Optional[list[str]]]:
 
 def cmd_logs(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
-    result = endpoints.job_logs(client, args.job_id, page_size=args.tail)
+    _require_job(client, args.job_id)
+    # --tail = the most recent N: fetch newest-first, then restore chrono order.
+    result = endpoints.job_logs(client, args.job_id, page_size=args.tail, sort="descend")
+    meta = result.get("ResponseMetadata") if isinstance(result, dict) else None
+    if isinstance(meta, dict) and meta.get("Error"):
+        raise QzError(
+            f"任务 {args.job_id} 暂无可取日志（实例可能尚未调度/启动）",
+            code="no_instances",
+            hint="用 qzcli instances <job_id> 查看实例状态",
+        )
+    logs = result.get("logs") if isinstance(result, dict) else None
+    if isinstance(logs, list):
+        result["logs"] = list(reversed(logs))
     return result, None
 
 
@@ -198,26 +309,32 @@ def cmd_stop(args) -> tuple[Any, Optional[list[str]]]:
 def cmd_events(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
     if args.instance:
-        return endpoints.instance_events(client, args.job_id, args.instance), None
-    return endpoints.job_events(client, args.job_id), None
+        events = endpoints.instance_events(client, args.job_id, args.instance)
+    else:
+        _require_job(client, args.job_id)
+        events = endpoints.job_events(client, args.job_id)
+    rows = _condense_events(events, tail=args.tail)
+    return rows, ["last_timestamp", "type", "reason", "count", "from", "message"]
 
 
 def cmd_detail(args) -> tuple[Any, Optional[list[str]]]:
-    return endpoints.job_detail(_client(), args.job_id), None
+    return _require_job(_client(), args.job_id), None
 
 
 def cmd_instances(args) -> tuple[Any, Optional[list[str]]]:
-    items = endpoints.list_job_instances(_client(), args.job_id)
+    client = _client()
+    _require_job(client, args.job_id)
+    items = endpoints.list_job_instances(client, args.job_id)
     return items, ["name", "instance_type", "node", "instance_status", "running_time_ms"]
 
 
 def cmd_metrics(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
-    detail = endpoints.job_detail(client, args.job_id)
+    detail = _require_job(client, args.job_id)
     lcg = detail.get("logic_compute_group_id", "")
     if not lcg:
         raise QzError(
-            f"无法获取任务 {args.job_id} 的计算组（任务可能不存在）",
+            f"无法获取任务 {args.job_id} 的计算组",
             code="invalid_job", hint="先用 qzcli ls -w <ws> 确认 job_id",
         )
     end = int(time.time())
@@ -246,14 +363,33 @@ def cmd_metrics(args) -> tuple[Any, Optional[list[str]]]:
 
 # --- argument parser ------------------------------------------------------
 
+class JsonArgumentParser(argparse.ArgumentParser):
+    """argparse that emits the JSON error envelope (not a plain usage line).
+
+    Keeps the "all output is JSON" contract for the most common mistake —
+    a missing/invalid flag — so an agent piping JSON recovers instead of
+    crashing on a parse error + exit code 2.
+    """
+
+    def error(self, message: str):  # noqa: D102
+        err = QzError(
+            f"参数错误: {message}",
+            code="usage_error",
+            hint=f"查看用法: qzcli {self.prog.replace('qzcli ', '')} -h",
+        )
+        # --table isn't parsed yet at error time; JSON is the contract default.
+        output.emit_error(err, table=False)
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = JsonArgumentParser(
         prog="qzcli",
         description="启智平台 agent-first CLI（逆向网页 API，cookie 认证，默认 JSON 输出）",
     )
     p.add_argument("--version", action="version", version=f"qzcli {__version__}")
     p.add_argument("--table", action="store_true", help="人类可读表格输出（默认 JSON）")
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=True, parser_class=JsonArgumentParser)
 
     sp = sub.add_parser("login", help="CAS 登录，保存 cookie 到 ~/.qzcli/")
     sp.add_argument("-u", "--username")
@@ -277,7 +413,9 @@ def build_parser() -> argparse.ArgumentParser:
     o = osub.add_parser("images", help="列出工作空间可用镜像")
     o.add_argument("-w", "--workspace", required=True)
     o.add_argument("--source", default="ALL",
-                   help="SOURCE_OFFICIAL / SOURCE_PUBLIC / ALL（默认）")
+                   help="ALL（默认）/ SOURCE_OFFICIAL / SOURCE_PUBLIC / SOURCE_PRIVATE")
+    o.add_argument("--verbose", action="store_true",
+                   help="包含完整 creator 等元数据（默认精简，只留 address 等关键字段）")
     o.set_defaults(func=cmd_options)
 
     sp = sub.add_parser("dataset", help="数据集相关")
@@ -305,6 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--low-priority-threshold", type=int,
                     default=avail_core.LOW_PRIORITY_THRESHOLD,
                     help=f"优先级 <= 此值视为低优可抢占（默认 {avail_core.LOW_PRIORITY_THRESHOLD}）")
+    sp.add_argument("--fit", metavar="IxC",
+                    help="可落性检查：每个机房有几个节点能放下「每节点 C 卡」的任务，"
+                         "是否够 I 个节点（如 2x8）。聚合空闲卡可能碎片化、放不下整节点任务")
     sp.set_defaults(func=cmd_rooms)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")
@@ -342,16 +483,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("logs", help="任务日志")
     sp.add_argument("job_id")
-    sp.add_argument("--tail", type=int, default=200, help="拉取条数")
+    sp.add_argument("--tail", type=int, default=200, help="取最近 N 条（最新在后）")
     sp.set_defaults(func=cmd_logs)
 
     sp = sub.add_parser("stop", help="停止任务")
     sp.add_argument("job_id")
     sp.set_defaults(func=cmd_stop)
 
-    sp = sub.add_parser("events", help="任务/实例事件")
+    sp = sub.add_parser("events", help="任务/实例事件（最新优先，重复事件折叠计数）")
     sp.add_argument("job_id")
     sp.add_argument("--instance", help="实例名 <job_id>-worker-N（默认看 job 级事件）")
+    sp.add_argument("--tail", type=int, default=None, help="只看最近 N 类事件")
     sp.set_defaults(func=cmd_events)
 
     sp = sub.add_parser("detail", help="任务详情")

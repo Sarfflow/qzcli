@@ -41,9 +41,11 @@ To update: `git -C ~/.claude/skills/qzcli pull && (cd ~/.claude/skills/qzcli && 
    next* (`error.code`, `error.hint`, and `error.candidates` listing the
    currently-legal choices). No silent failures, no bare error codes.
 2. **Read before write** — you enumerate the legal options for each field
-   (`qzcli options ...`) before submitting. `create --dry-run` is the read step;
-   `create` re-runs it internally and refuses to submit anything that fails
-   validation. It never guesses or auto-selects.
+   (`qzcli options ...`) before submitting. `create` runs that read+validation
+   internally and refuses to submit anything that fails, so the read is enforced
+   without a separate step. It never guesses or auto-selects. `create --dry-run`
+   is the optional preview: same validation, submits nothing, shows the resolved
+   payload so you can check the inferred fields before a real job exists.
 3. **No OpenAPI** — only the cookie-authed web API the browser uses.
 4. **Agent-first** — JSON by default (stable `{"ok", "data"|"error"}` envelope);
    `--table` is the only human view and exposes nothing JSON can't.
@@ -61,13 +63,13 @@ uv run pytest -q   # run the test suite
 ```bash
 qzcli login -u <学工号> -p <密码>          # or QZCLI_USERNAME / QZCLI_PASSWORD
 qzcli projects                              # project→space hierarchy
-qzcli options compute-groups -w ws-xxx
-qzcli options specs -w ws-xxx -g lcg-yyy
-qzcli options images -w ws-xxx
-qzcli create --dry-run --name demo -w ws-xxx -g lcg-yyy \
+qzcli rooms -w ws-xxx                        # which 机房 (lcg) is emptiest
+qzcli options specs -w ws-xxx -g lcg-yyy     # pick a quota_id
+qzcli options images -w ws-xxx               # pick an image address
+qzcli create --name demo -w ws-xxx -g lcg-yyy \
   --quota-id quota-zzz --image docker.sii/...:tag --cmd "python train.py"
-qzcli create        --name demo -w ws-xxx -g lcg-yyy \
-  --quota-id quota-zzz --image docker.sii/...:tag --cmd "python train.py"
+# optional: add --dry-run to the same command first to preview the resolved
+# payload (project / image_type / shm / spec) without creating a job.
 qzcli ls -w ws-xxx --running
 qzcli logs <job_id> --tail 200
 qzcli stop <job_id>

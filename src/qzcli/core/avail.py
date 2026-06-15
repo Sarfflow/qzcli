@@ -97,11 +97,13 @@ def cluster_availability(
 
     The cluster schedules jobs itself, so the per-node list is usually not
     needed — and the fleet is hundreds of physical nodes. By default ``nodes``
-    is the emptiest few schedulable nodes with spare capacity (``effective_free
-    > 0``, ``Ready``), capped at ``top``; that's enough to confirm a job's nodes
-    exist (a 16-card job needs two free 8-card nodes). ``include_all`` returns
-    every node (and ignores ``top``); ``top=None`` keeps all schedulable ones.
-    ``n_nodes`` is always the true fleet size; ``n_nodes_shown`` the list size.
+    is the emptiest few SCHEDULABLE nodes WITH SPARE CAPACITY (``effective_free
+    > 0`` and ``Ready`` — fully-busy and unschedulable nodes are never listed),
+    capped at ``top``; that's enough to confirm a job's nodes exist (a 16-card
+    job needs two free 8-card nodes). ``include_all`` returns every node in the
+    fleet (and ignores ``top``); ``top=None`` keeps all the spare-capacity ones.
+    ``n_nodes`` is always the true fleet size, ``n_nodes_shown`` the list size,
+    and ``nodes_truncated`` is true when ``top`` hid some spare-capacity nodes.
     """
     nodes_raw = _fetch_all_nodes(
         client, workspace_id, logic_compute_group_id=logic_compute_group_id,
@@ -142,6 +144,7 @@ def cluster_availability(
     nodes.sort(key=lambda x: (x["effective_free"], x["gpu_free"]), reverse=True)
 
     n_total = len(nodes)
+    truncated = False
     if not include_all:
         # The scheduler places jobs itself; you rarely need the node list, and
         # when you do you only need the emptiest few (a 16-card job = 2 free
@@ -149,8 +152,10 @@ def cluster_availability(
         # capped at `top`. `include_all` returns every node (ignores `top`).
         nodes = [n for n in nodes
                  if n["effective_free"] > 0 and n["status"] == "Ready"]
-        if top is not None:
+        n_schedulable = len(nodes)
+        if top is not None and top < n_schedulable:
             nodes = nodes[:top]
+            truncated = True
 
     by_gpu_type = [
         {
@@ -169,6 +174,7 @@ def cluster_availability(
         "low_priority_threshold": low_priority_threshold,
         "n_nodes": n_total,
         "n_nodes_shown": len(nodes),
+        "nodes_truncated": truncated,
         "by_gpu_type": by_gpu_type,
         "nodes": nodes,
     }
@@ -185,6 +191,7 @@ def rooms_availability(
     workspace_id: str,
     *,
     low_priority_threshold: int = LOW_PRIORITY_THRESHOLD,
+    fit: Optional[tuple[int, int]] = None,
 ) -> dict[str, Any]:
     """Per-机房 (logic compute group) GPU availability, ranked roomiest-first.
 
@@ -195,11 +202,20 @@ def rooms_availability(
     机房 share physical nodes, so totals across rows overlap and ``gpu_free`` can
     go negative (the 机房 is oversubscribed). ``effective_free`` adds GPUs held by
     low-priority tasks a higher-priority job could evict.
+
+    Room aggregates do NOT imply node-level placeability: free cards may be
+    fragmented 1-2 per node, so a 机房 with gpu_free=24 can be unable to host a
+    single 8-card node. ``max_free_on_single_node`` and ``nodes_full_free`` flag
+    that; ``fit=(instances, cards_per_node)`` adds, per room, how many Ready
+    nodes can host ``cards_per_node`` idle (``fit_nodes_idle``) or effective-free
+    (``fit_nodes_effective``) cards, and whether that meets ``instances``
+    (``fits``). When ``fit`` is set, rooms are ranked by fit first.
     """
     groups = endpoints.list_compute_groups(client, workspace_id)
     preemptible_by_node = _preemptible_by_node(
         client, workspace_id, low_priority_threshold
     )
+    fit_inst, fit_cards = fit if fit else (0, 0)
 
     rooms: list[dict[str, Any]] = []
     for g in groups:
@@ -208,20 +224,37 @@ def rooms_availability(
         )
         gpu_total = gpu_free = gpu_used = preempt = 0.0
         ready = 0
+        max_free = 0
+        nodes_full_free = 0
+        fit_idle = fit_eff = 0
         gpu_types: set[str] = set()
         clusters: set[str] = set()
         for n in nodes_raw:
             gpu = n.get("gpu") or {}
-            gpu_total += _num(gpu, "total")
-            gpu_free += _num(gpu, "available")
+            n_total = _num(gpu, "total")
+            n_free = _num(gpu, "available")
+            gpu_total += n_total
+            gpu_free += n_free
             gpu_used += _num(gpu, "used")
-            preempt += preemptible_by_node.get(n.get("name", ""), 0)
-            if n.get("status") == "Ready":
+            n_pre = preemptible_by_node.get(n.get("name", ""), 0)
+            preempt += n_pre
+            is_ready = n.get("status") == "Ready"
+            if is_ready:
                 ready += 1
+                # Node-level placeability is what gang-scheduled jobs need.
+                if n_free > max_free:
+                    max_free = int(n_free)
+                if n_total > 0 and n_free >= n_total:
+                    nodes_full_free += 1
+                if fit_cards:
+                    if n_free >= fit_cards:
+                        fit_idle += 1
+                    if n_free + n_pre >= fit_cards:
+                        fit_eff += 1
             gpu_types.add(n.get("gpu_type", "")
                           or (n.get("gpu_info") or {}).get("gpu_type", ""))
             clusters.add(n.get("cluster_name", ""))
-        rooms.append({
+        room = {
             "room": g.name,
             "lcg_id": g.id,
             "gpu_type": _join(gpu_types) or g.gpu_type,
@@ -233,15 +266,33 @@ def rooms_availability(
             "gpu_used": int(gpu_used),
             "low_priority_preemptible": round(preempt, 1),
             "effective_free": round(gpu_free + preempt, 1),
-        })
+            "max_free_on_single_node": max_free,
+            "nodes_full_free": nodes_full_free,
+        }
+        if fit_cards:
+            room["fit_nodes_idle"] = fit_idle
+            room["fit_nodes_effective"] = fit_eff
+            room["fits"] = fit_eff >= fit_inst
+        rooms.append(room)
 
-    # Roomiest first: idle cards, then evictable headroom, then fleet size.
-    rooms.sort(
-        key=lambda r: (r["gpu_free"], r["effective_free"], r["gpu_total"]),
-        reverse=True,
-    )
-    return {
+    if fit_cards:
+        # Placeability first: fits, then idle-fitting nodes, then effective.
+        rooms.sort(
+            key=lambda r: (r["fits"], r["fit_nodes_idle"], r["fit_nodes_effective"],
+                           r["effective_free"]),
+            reverse=True,
+        )
+    else:
+        # Roomiest first: idle cards, then evictable headroom, then fleet size.
+        rooms.sort(
+            key=lambda r: (r["gpu_free"], r["effective_free"], r["gpu_total"]),
+            reverse=True,
+        )
+    out: dict[str, Any] = {
         "low_priority_threshold": low_priority_threshold,
         "n_rooms": len(rooms),
         "rooms": rooms,
     }
+    if fit_cards:
+        out["fit"] = {"instances": fit_inst, "cards_per_node": fit_cards}
+    return out
