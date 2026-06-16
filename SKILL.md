@@ -65,7 +65,10 @@ The predefined card-count quotas (1/2/4/8…). `gpu_count` is **cards per node**
 
 ### `options images -w <ws> [--source ALL|SOURCE_OFFICIAL|SOURCE_PUBLIC|SOURCE_PRIVATE] [--verbose]`
 → `data: [ {address, name, image_id, source, visibility} ]`
-Use `address` as `--image`. `--verbose` adds the heavy `creator` object (dropped
+Use `address` as `--image`. **A notebook-saved personal image surfaces as
+`source=SOURCE_PUBLIC` + `visibility=VISIBILITY_PRIVATE` (NOT SOURCE_PRIVATE)** —
+so to find an image you just saved, use `--source ALL`, not `--source SOURCE_PRIVATE`.
+`--verbose` adds the heavy `creator` object (dropped
 by default). A bad `--source` errors with `invalid_argument` + candidates.
 
 ### `rooms -w <ws> [--low-priority-threshold N] [--fit IxC]`
@@ -93,7 +96,8 @@ hid some). `--top 0` = all spare-capacity nodes; `--all` = every node in the fle
 Options: `--project` (id / 中文名 / en_name), `--quota-id`, `--cpu`, `--gpu`, `--mem`,
 `--framework` (default `pytorch`), `--image-type` (default: the image's source),
 `--instances` (default 1), `--shm` GiB (default: spec memory), `--priority` 1–10
-(default 10 — a project may cap this; on `priority_too_high` lower it), `--no-image-check`,
+(default 10; a project caps this — `--dry-run`/submit fail fast with `priority_too_high`
+naming the exact cap, so set `--priority <= cap`), `--no-image-check`,
 `--dataset id[:version]` (repeatable), `--wait/--no-wait`, `--timeout`.
 - **Blocks until the job is running by default** (qzcli polls; queue time is not
   charged against `--timeout`, default 600s). Adds `wait:{final_status,reached,
@@ -116,6 +120,9 @@ fails (default-version resolution is dataset-dependent).
 
 ### `ls -w <ws> [--running] [--limit N]`
 → `data: {total, jobs: [{job_id, name, status, workspace_id, project_id, logic_compute_group_id, created_at}]}`
+Job `status` is **`job_`-prefixed**: `job_queuing` / `job_creating` / `job_running`
+/ `job_succeeded` / `job_failed` / `job_stopped`. (Match on these exact strings —
+they are NOT the bare `RUNNING`/`SUCCEEDED` forms.) `--running` filters to running.
 
 ### `instances JOB_ID`
 → `data: [ {name, instance_type, node, instance_status, created_at, started_at, finished_at, running_time_ms} ]`
@@ -124,6 +131,10 @@ fails (default-version resolution is dataset-dependent).
 → `data: {logs: [{message, pod_name, node, time, timestamp_ms, ...}], total}`
 `--tail N` (default 200) returns the most recent N lines, oldest-first (newest
 last). A bad JOB_ID → `invalid_job`; a job with no scheduled pods → `no_instances`.
+When the platform returns **0 lines**, the response adds `logs_available:false` +
+a `note`: if the job is terminal the logs are unavailable (some pods never get
+indexed) — **stop polling**; if it's still starting, retry shortly. (Don't loop
+on an empty `logs` without checking `note`.)
 
 ### `metrics JOB_ID [--minutes N] [--interval S] [--metric M ...]`
 Per-instance utilization over time — check a running job is actually using GPUs.
@@ -213,8 +224,10 @@ deps, and smoke-test before `save-image`.
 
 ### `nb save-image NOTEBOOK_ID --name N --version V`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks
-until the build reaches SUCCESS by default (`--no-wait` to return at submit). The
-image then appears in `options images` (PRIVATE) and is usable as `create --image`.
+until the build reaches SUCCESS by default (`--no-wait` to return at submit). On
+success the result includes `image_address` (+ `image_id`) — feed it straight to
+`create --image` (no need to go hunt it in `options images`). The image lists under
+`options images --source ALL` (as `source=SOURCE_PUBLIC`, `visibility=PRIVATE`).
 Can't stop the notebook while a save is BUILDING.
 
 ### `nb stop NOTEBOOK_ID`

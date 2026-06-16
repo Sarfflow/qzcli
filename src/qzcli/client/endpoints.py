@@ -373,6 +373,44 @@ def delete_image(client: Client, image_id: str) -> Any:
     return client.delete_api(f"image/{image_id}")
 
 
+def find_saved_image(
+    client: Client, workspace_id: str, name: str, version: str
+) -> Optional[Image]:
+    """Locate an image by ``name:version`` across all sources.
+
+    A notebook-saved personal image surfaces with ``source=SOURCE_PUBLIC`` and
+    ``visibility=VISIBILITY_PRIVATE`` (not SOURCE_PRIVATE), so we search every
+    source. Used to hand back the saved image's full address after save-image.
+    """
+    target = f"{name}:{version}"
+    for src in ("SOURCE_PRIVATE", "SOURCE_PUBLIC", "SOURCE_OFFICIAL"):
+        try:
+            for im in list_images(client, workspace_id, source=src):
+                if im.name == target or im.address == target or im.address.endswith("/" + target):
+                    return im
+        except QzError:
+            continue
+    return None
+
+
+def project_priority_cap(client: Client, project_id: str) -> Optional[int]:
+    """The max task priority a project allows (its numeric ``priority_name``).
+
+    ``create`` rejects ``task_priority > project priority`` server-side (code
+    200006) without naming the cap; this lets us surface it. Returns None if it
+    can't be determined (then the server check remains the backstop).
+    """
+    data = client.post_api("project/list_for_page", {"page": 0, "page_size": 200}) or {}
+    items = data.get("list") or data.get("items") or []
+    for p in items:
+        if p.get("id") == project_id:
+            try:
+                return int(p.get("priority_name"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def list_notebooks(
     client: Client, workspace_id: str, *, page: int = 0, page_size: int = 100
 ) -> list[dict[str, Any]]:

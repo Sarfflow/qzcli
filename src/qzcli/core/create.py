@@ -221,6 +221,17 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
         )
     project_id = project.id
 
+    # 3b. priority cap: a project caps task priority (priority_name). Validate up
+    #     front so --dry-run and submit fail with the real number, not a server
+    #     200006 that hides the cap.
+    cap = endpoints.project_priority_cap(client, project_id)
+    if cap is not None and req.priority > cap:
+        raise QzError(
+            f"--priority {req.priority} 超过项目 '{project.name}' 的优先级上限 {cap}",
+            code="priority_too_high",
+            hint=f"用 --priority <= {cap} 重试",
+        )
+
     cg = options.resolve_compute_group(client, workspace_id, req.compute_group)
     compute_group_id = cg.id
 

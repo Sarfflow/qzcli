@@ -359,7 +359,7 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
         )
     res = endpoints.save_notebook_image(client, notebook_id, name, version, accessible=accessible)
     out = {"notebook_id": notebook_id, "image_name": name, "version": version,
-           "accessible": accessible, "result": res}
+           "accessible": accessible, "image_address": "", "result": res}
     if wait:
         w = waitlib.wait_until(
             lambda: _save_status(client, notebook_id),
@@ -371,6 +371,13 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
                 code="save_image_failed",
                 hint=f"通常是构建中途被停/基础镜像问题；qzcli nb get {notebook_id} 看详情",
             )
+        if w["reached"]:
+            ws = nb.get("workspace")
+            ws_id = ws.get("id") if isinstance(ws, dict) else (ws or "")
+            img = endpoints.find_saved_image(client, ws_id, name, version) if ws_id else None
+            if img:
+                out["image_address"] = img.address
+                out["image_id"] = img.image_id
     return out
 
 

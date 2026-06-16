@@ -384,8 +384,25 @@ def cmd_logs(args) -> tuple[Any, Optional[list[str]]]:
             hint="用 qzcli instances <job_id> 查看实例状态",
         )
     logs = result.get("logs") if isinstance(result, dict) else None
-    if isinstance(logs, list):
+    if isinstance(logs, list) and logs:
         result["logs"] = list(reversed(logs))
+        return result, None
+    # No log lines: disambiguate "not indexed yet" from "genuinely no output / not
+    # retrievable" using the job's phase, so the caller stops polling when futile.
+    if isinstance(result, dict):
+        try:
+            status = (endpoints.job_detail(client, args.job_id) or {}).get("status", "")
+        except QzError:
+            status = ""
+        terminal = status in ("job_succeeded", "job_failed", "job_stopped")
+        result["logs"] = []
+        result["logs_available"] = False
+        result["note"] = (
+            f"0 条日志；job 状态 {status or '未知'}（终态）——平台未对该 job 的 pod 返回任何"
+            "日志行。对终态 job 这通常表示日志不可取（并非确认无输出），不必继续轮询。"
+            if terminal else
+            f"0 条日志；job 状态 {status or '未知'}——日志可能尚未索引，稍后用同样命令重试。"
+        )
     return result, None
 
 
