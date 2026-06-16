@@ -21,6 +21,7 @@ from .client import endpoints
 from .client.http import Client
 from .core import avail as avail_core
 from .core import create as create_core
+from .core import notebook as notebook_core
 from .core import options as options_core
 from .errors import QzError
 
@@ -223,6 +224,51 @@ def _parse_fit(spec: Optional[str]) -> Optional[tuple[int, int]]:
             code="invalid_argument",
             hint="用 IxC（节点数x每节点卡数，如 2x8）或单个 C（如 8）",
         )
+
+
+def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
+    client = _client()
+    if args.nb_target == "ls":
+        ws_id, _ = _resolved_ws(client, args.workspace)
+        rows = notebook_core.list_notebooks(client, ws_id)
+        return rows, [
+            "name", "status", "room", "gpu_count", "gpu_ram",
+            "image", "backup_image", "notebook_id",
+        ]
+    if args.nb_target == "rooms":
+        ws_id, _ = _resolved_ws(client, args.workspace)
+        return notebook_core.rooms(client, ws_id), [
+            "id", "name", "gpu_types", "node_count", "schedule_type",
+        ]
+    if args.nb_target == "specs":
+        ws_id, _ = _resolved_ws(client, args.workspace)
+        lcg = notebook_core.resolve_compute_group(client, ws_id, args.compute_group)
+        specs = notebook_core.specs(client, ws_id, lcg["logic_compute_group_id"])
+        return [s.to_dict() for s in specs], [
+            "quota_id", "gpu_type", "gpu_count", "cpu_count", "memory_gb",
+            "total_price_per_hour",
+        ]
+    if args.nb_target == "get":
+        return endpoints.get_notebook(client, args.notebook_id), None
+    if args.nb_target == "start":
+        req = notebook_core.NotebookStartRequest(
+            name=args.name, workspace=args.workspace, compute_group=args.compute_group,
+            image=args.image, project=args.project, quota_id=args.quota_id,
+            cpu=args.cpu, gpu=args.gpu, mem=args.mem, shm=args.shm,
+            priority=args.priority, auto_stop=args.auto_stop,
+        )
+        return notebook_core.start(client, req, dry_run=args.dry_run), None
+    if args.nb_target == "stop":
+        res = endpoints.stop_notebook(client, args.notebook_id)
+        return {"stopped": args.notebook_id, "result": res}, None
+    if args.nb_target == "rm":
+        res = notebook_core.delete(client, args.notebook_id, stop_first=args.stop)
+        return {"deleted": args.notebook_id, "result": res}, None
+    if args.nb_target == "save-image":
+        return notebook_core.save_image(
+            client, args.notebook_id, args.name, args.version,
+        ), None  # accessible=1 (private personal image — the confirmed common case)
+    raise QzError(f"未知 nb 目标: {args.nb_target}", code="usage_error")
 
 
 def cmd_rooms(args) -> tuple[Any, Optional[list[str]]]:
@@ -447,6 +493,49 @@ def build_parser() -> argparse.ArgumentParser:
                     help="可落性检查：每个机房有几个节点能放下「每节点 C 卡」的任务，"
                          "是否够 I 个节点（如 2x8）。聚合空闲卡可能碎片化、放不下整节点任务")
     sp.set_defaults(func=cmd_rooms)
+
+    sp = sub.add_parser("nb", help="交互式建模(notebook)：起停、保存个人镜像")
+    nsub = sp.add_subparsers(dest="nb_target", required=True, parser_class=JsonArgumentParser)
+    n = nsub.add_parser("ls", help="列出工作空间下的 notebook（运行中优先）")
+    n.add_argument("-w", "--workspace", required=True)
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("rooms", help="列支持交互式建模的机房(lcg)")
+    n.add_argument("-w", "--workspace", required=True)
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("specs", help="列机房的 DSW 规格(quota_id + cpu/gpu/mem/价格)")
+    n.add_argument("-w", "--workspace", required=True)
+    n.add_argument("-g", "--compute-group", required=True, help="机房 lcg（见 nb rooms）")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("get", help="单个 notebook 详情（轮询状态用）")
+    n.add_argument("notebook_id")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("start", help="起一个交互式建模 notebook（--dry-run 先校验）")
+    n.add_argument("--name", required=True)
+    n.add_argument("-w", "--workspace", required=True)
+    n.add_argument("-g", "--compute-group", required=True, help="机房 lcg（见 nb ls / 平台）")
+    n.add_argument("--image", required=True, help="基础镜像 address（含完整 registry 前缀）")
+    n.add_argument("--project", help="项目 id/名称（多项目空间必填）")
+    n.add_argument("--quota-id", dest="quota_id", help="DSW 规格 quota_id")
+    n.add_argument("--cpu", type=int)
+    n.add_argument("--gpu", type=int)
+    n.add_argument("--mem", type=int, help="内存 GiB")
+    n.add_argument("--shm", type=int, help="共享内存 GiB（默认=内存）")
+    n.add_argument("--priority", type=int, default=notebook_core.DEFAULT_PRIORITY)
+    n.add_argument("--auto-stop", dest="auto_stop", action="store_true")
+    n.add_argument("--dry-run", action="store_true", help="只校验+预览 payload，不创建")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("stop", help="停止 notebook")
+    n.add_argument("notebook_id")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("rm", help="删除 notebook（需先 STOPPED；--stop 自动停后再删）")
+    n.add_argument("notebook_id")
+    n.add_argument("--stop", action="store_true", help="先停止并等待 STOPPED 再删除")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("save-image", help="把运行中的 notebook 存为个人镜像（私有）")
+    n.add_argument("notebook_id")
+    n.add_argument("--name", required=True, help="镜像名")
+    n.add_argument("--version", required=True, help="镜像版本 tag")
+    n.set_defaults(func=cmd_nb)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")
     sp.add_argument("--name", required=True)

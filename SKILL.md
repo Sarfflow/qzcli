@@ -140,6 +140,52 @@ recent. Startup `Unschedulable` warnings are normal transient noise.
 ### `detail JOB_ID`
 → `data: {...}` (full job detail)
 
+## Interactive modeling — `nb ...` (notebook)
+
+A *notebook* is a long-lived dev container (启智 "交互式建模"): start one on a 机房,
+work in it (configure env, smoke-test), save it as a personal image, stop it —
+then `create` distributed training from that image. Same GPFS as your other
+instances in the project, so code is already shared. Read-before-write mirrors
+`create` but on the notebook-specific 机房/specs (interactive-modeling lcgs, DSW
+quotas) and the v2 `notebook` API.
+
+Flow: `nb rooms` → `nb specs` → `nb start` → (work) → `nb save-image` → `nb stop`.
+
+### `nb ls -w <ws>`
+→ `data: [ {name, status, room, gpu_count, gpu_ram, image, backup_image, notebook_id, ...} ]`
+Running first. `notebook_id` (uuid) is the handle for the other `nb` commands.
+
+### `nb rooms -w <ws>`
+→ `data: [ {id (lcg), name, gpu_types, node_count, schedule_type} ]`
+机房 that support interactive modeling (a different set than training's).
+
+### `nb specs -w <ws> -g <lcg>`
+→ `data: [ {quota_id, gpu_type, gpu_count, cpu_count, memory_gb, total_price_per_hour} ]`
+DSW (interactive-modeling) quotas for the 机房. Pick a `quota_id`.
+
+### `nb start --name N -w <ws> -g <lcg> --image ADDR [--dry-run]`
+Options: `--project` (multi-project ws), `--quota-id` (from `nb specs`),
+`--cpu/--gpu/--mem`, `--shm`, `--priority` (default 6), `--auto-stop`.
+- → `data: {notebook_id, name, workspace_id, resolved, result}`
+- `--dry-run` → `{dry_run:true, resolved, payload}`, creates nothing.
+- `--image` is the base image `address` (full registry URL, e.g. from `options images`).
+
+### `nb get NOTEBOOK_ID`
+→ full notebook detail (poll `status`: PENDING→CREATING→RUNNING; also STOPPED/FAILED).
+
+### `nb save-image NOTEBOOK_ID --name N --version V`
+Save a **RUNNING** notebook as a private personal image (`accessible=1`). Async —
+poll `nb get`'s `save_mirror_status` (BUILDING→SUCCESS). The image then appears in
+`options images` (PRIVATE) and is usable as `create --image`. Can't stop the
+notebook while a save is BUILDING.
+
+### `nb stop NOTEBOOK_ID`
+→ `data: {stopped, result}`. Stop is async (RUNNING→STOPPED).
+
+### `nb rm NOTEBOOK_ID [--stop]`
+Delete a notebook — the platform requires it be STOPPED/FAILED first. `--stop`
+stops it and waits for STOPPED, then deletes.
+
 ## Error codes (`error.code`)
 
 | code | meaning | next step |
@@ -153,6 +199,7 @@ recent. Startup `Unschedulable` warnings are normal transient noise.
 | `usage_error` / `invalid_argument` | bad/missing CLI flag or value | see `hint` / `candidates` |
 | `incomplete_spec` | spec lacks cpu/mem | pass `--cpu`/`--mem` |
 | `invalid_dataset` | dataset/version ref bad | fix the ref (see message) |
+| `invalid_notebook` / `invalid_notebook_state` | bad notebook id, or wrong status for the op | `qzcli nb ls`; save needs RUNNING, rm needs STOPPED |
 | `invalid_job` | bad/unknown JOB_ID | `qzcli ls -w <ws>` for valid ids |
 | `no_instances` | job has no scheduled pods yet | `qzcli instances <job_id>` / wait |
 | `no_specs` / `no_compute_groups` / `no_workspaces` | nothing available | see `hint` |

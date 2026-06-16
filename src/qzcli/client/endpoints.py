@@ -10,7 +10,29 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..domain.models import ComputeGroup, Image, Job, Project
+from ..errors import QzError
 from .http import Client
+
+
+def _v2_result(client: Client, service: str, action: str, body: dict[str, Any]) -> Any:
+    """POST a v2 action, unwrap ``Result``, and raise on a ResponseMetadata error.
+
+    The v2 surface returns 200 with a ``{ResponseMetadata:{Error:{Code,Message}}}``
+    body on business failures (it does not use HTTP status), so callers that only
+    check the transport would treat a failure as success.
+    """
+    r = client.post_v2(service, action, body)
+    if isinstance(r, dict):
+        err = (r.get("ResponseMetadata") or {}).get("Error")
+        if err:
+            raise QzError(
+                f"{action} 失败: {err.get('Message') or err.get('Code')}",
+                code="api_error",
+                hint=f"平台错误码 {err.get('Code')}",
+            )
+        if isinstance(r.get("Result"), dict):
+            return r["Result"]
+    return r
 
 
 def _ws_referer(client: Client, page: str, workspace_id: str) -> str:
@@ -339,6 +361,79 @@ def list_images(
             im.setdefault("_source", src)
             out.append(Image.from_api(im))
     return out
+
+
+# --- notebooks (interactive modeling) -------------------------------------
+
+def list_notebooks(
+    client: Client, workspace_id: str, *, page: int = 0, page_size: int = 100
+) -> list[dict[str, Any]]:
+    """Interactive-modeling notebooks via ``/api/v1/notebook/list``.
+
+    Returns the raw notebook objects (the list endpoint already carries full
+    detail — image, backup_image, quota, logic_compute_group, start_config,
+    extra_info(ssh), save_mirror_status — so there is no separate detail call).
+    """
+    data = client.post_api(
+        "notebook/list",
+        {"workspace_id": workspace_id, "page": page, "page_size": page_size},
+        referer=_ws_referer(client, "interactiveModeling", workspace_id),
+    ) or {}
+    return data.get("list") or []
+
+
+def list_notebook_compute_groups(
+    client: Client, workspace_id: str
+) -> list[dict[str, Any]]:
+    """机房 (logic compute groups) that support interactive modeling.
+
+    Notebooks use a different 机房 set than training — via v2
+    ``ListLogicComputeGroups`` filtered by ``support_job_type=interactive_modeling``.
+    """
+    r = _v2_result(
+        client, "workspace", "ListLogicComputeGroups",
+        {"filter": {"workspace_id": workspace_id, "include_gpu_type_stats": True,
+                    "support_job_type": "interactive_modeling"},
+         "page_num": 1, "page_size": -1, "sorter": []},
+    )
+    return (r or {}).get("logic_compute_groups") or []
+
+
+def get_notebook(client: Client, notebook_id: str) -> dict[str, Any]:
+    return _v2_result(client, "notebook", "GetNotebook", {"notebook_id": notebook_id})
+
+
+def create_notebook(client: Client, payload: dict[str, Any]) -> dict[str, Any]:
+    return _v2_result(client, "notebook", "CreateNotebook", payload)
+
+
+def stop_notebook(client: Client, notebook_id: str) -> dict[str, Any]:
+    return _v2_result(client, "notebook", "StopNotebook", {"notebook_id": notebook_id})
+
+
+def delete_notebook(client: Client, notebook_id: str) -> dict[str, Any]:
+    return _v2_result(client, "notebook", "DeleteNotebook", {"notebook_id": notebook_id})
+
+
+def save_notebook_image(
+    client: Client, notebook_id: str, name: str, version: str, *, accessible: int = 1
+) -> dict[str, Any]:
+    """Save a running notebook as a personal image (``SaveNotebookImage``).
+
+    Body uses camelCase ``notebookId``. ``accessible=1`` = private personal image
+    (the common case). The notebook must be RUNNING.
+    """
+    return _v2_result(
+        client, "notebook", "SaveNotebookImage",
+        {"notebookId": notebook_id, "name": name, "version": version,
+         "accessible": accessible},
+    )
+
+
+def estimate_save_size(client: Client, notebook_id: str) -> dict[str, Any]:
+    """Estimate the size of saving a notebook's image (running notebooks only)."""
+    return client.post_api("mirror/save/estimate_size",
+                           {"notebook_id": notebook_id}) or {}
 
 
 # --- cluster availability -------------------------------------------------
