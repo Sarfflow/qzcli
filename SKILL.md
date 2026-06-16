@@ -149,7 +149,18 @@ instances in the project, so code is already shared. Read-before-write mirrors
 `create` but on the notebook-specific 机房/specs (interactive-modeling lcgs, DSW
 quotas) and the v2 `notebook` API.
 
-Flow: `nb rooms` → `nb specs` → `nb start` → (work) → `nb save-image` → `nb stop`.
+**Where to start it (network constraint):** the H100/H200 distributed-training
+clusters are **offline** (no internet). Only **可上网 GPU** can reach the network.
+So when env setup needs the internet (pip/conda/git/HF), start the notebook on a
+可上网 GPU 机房 — which usually also fits the model, so an H-card notebook is
+rarely needed.
+
+**用卡文明 (release GPU promptly):** a notebook holds its GPU the whole time. The
+workflow is only *done* once the distributed job is **stably running** — at that
+point `nb stop` the notebook to free the GPU. (A CPU-side agent then monitors the
+job, e.g. polls every ~45 min, and re-runs this workflow on anomaly.)
+
+Flow: `nb rooms` → `nb specs` → `nb start` (on 可上网 GPU) → `nb exec` (configure env / smoke-test) → `nb save-image` → `create` distributed → **once it runs stably** → `nb stop`.
 
 ### `nb ls -w <ws>`
 → `data: [ {name, status, room, gpu_count, gpu_ram, image, backup_image, notebook_id, ...} ]`
@@ -172,6 +183,19 @@ Options: `--project` (multi-project ws), `--quota-id` (from `nb specs`),
 
 ### `nb get NOTEBOOK_ID`
 → full notebook detail (poll `status`: PENDING→CREATING→RUNNING; also STOPPED/FAILED).
+
+### `nb exec NOTEBOOK_ID -- <command>`
+Run a shell command **inside** a RUNNING notebook (drives its JupyterLab terminal
+over WebSocket — the platform has no SSH). Use it to configure the env, install
+deps, and smoke-test before `save-image`.
+- → `data: {notebook_id, exit_code, timed_out, stdout}`. `exit_code` is the last
+  statement's `$?`; `stdout` is the merged stdout+stderr (it's a PTY), cleaned of
+  ANSI/banner/prompt. `--raw` returns the unprocessed terminal text.
+- `--timeout S` (default 120) is the overall wall-clock budget; on overrun
+  `timed_out:true`, `exit_code:null`.
+- Quote/`--` the command: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
+- Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
+  `exit`; for env changes to persist into an image, `save-image` after.
 
 ### `nb save-image NOTEBOOK_ID --name N --version V`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Async —
@@ -199,7 +223,8 @@ stops it and waits for STOPPED, then deletes.
 | `usage_error` / `invalid_argument` | bad/missing CLI flag or value | see `hint` / `candidates` |
 | `incomplete_spec` | spec lacks cpu/mem | pass `--cpu`/`--mem` |
 | `invalid_dataset` | dataset/version ref bad | fix the ref (see message) |
-| `invalid_notebook` / `invalid_notebook_state` | bad notebook id, or wrong status for the op | `qzcli nb ls`; save needs RUNNING, rm needs STOPPED |
+| `invalid_notebook` / `invalid_notebook_state` | bad notebook id, or wrong status for the op | `qzcli nb ls`; save/exec need RUNNING, rm needs STOPPED |
+| `notebook_exec_failed` | notebook gateway rejected the terminal/exec | confirm `nb get` status=RUNNING; retry |
 | `invalid_job` | bad/unknown JOB_ID | `qzcli ls -w <ws>` for valid ids |
 | `no_instances` | job has no scheduled pods yet | `qzcli instances <job_id>` / wait |
 | `no_specs` / `no_compute_groups` / `no_workspaces` | nothing available | see `hint` |

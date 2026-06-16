@@ -268,6 +268,20 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
         return notebook_core.save_image(
             client, args.notebook_id, args.name, args.version,
         ), None  # accessible=1 (private personal image — the confirmed common case)
+    if args.nb_target == "exec":
+        cmd_parts = list(args.command or [])
+        if cmd_parts and cmd_parts[0] == "--":
+            cmd_parts = cmd_parts[1:]
+        cmd = " ".join(cmd_parts).strip()
+        if not cmd:
+            raise QzError(
+                "缺少要执行的命令", code="usage_error",
+                hint='用法: qzcli nb exec <notebook_id> -- <命令>',
+            )
+        return notebook_core.exec_command(
+            client, args.notebook_id, cmd,
+            timeout=args.timeout, strip_ansi=not args.raw,
+        ), None
     raise QzError(f"未知 nb 目标: {args.nb_target}", code="usage_error")
 
 
@@ -535,6 +549,16 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("notebook_id")
     n.add_argument("--name", required=True, help="镜像名")
     n.add_argument("--version", required=True, help="镜像版本 tag")
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser(
+        "exec", help="在运行中的 notebook 内执行命令（走 Jupyter 终端，无需 SSH）"
+    )
+    n.add_argument("notebook_id")
+    n.add_argument("command", nargs=argparse.REMAINDER,
+                   help="要执行的命令；建议用 -- 分隔，如 nb exec <id> -- pip list")
+    n.add_argument("--timeout", type=int, default=120, help="整体超时秒数（默认 120）")
+    n.add_argument("--raw", action="store_true",
+                   help="返回原始终端输出（保留 ANSI/banner，不裁剪）")
     n.set_defaults(func=cmd_nb)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")

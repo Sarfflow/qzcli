@@ -9,6 +9,9 @@ actually acts on, and keep the ids + ssh block needed by other `nb` commands.
 
 from __future__ import annotations
 
+import json
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -324,3 +327,149 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
     res = endpoints.save_notebook_image(client, notebook_id, name, version, accessible=accessible)
     return {"notebook_id": notebook_id, "image_name": name, "version": version,
             "accessible": accessible, "result": res}
+
+
+# --- nb exec --------------------------------------------------------------
+#
+# Run a shell command inside a RUNNING notebook over its JupyterLab terminal
+# WebSocket (terminado protocol). No SSH — the platform has none. We wrap the
+# command in unique START/END markers so stdout is isolated cleanly from the
+# PTY echo, the shell prompt, and the welcome banner, and we recover the exit
+# code from the END marker.
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text).replace("\r", "")
+
+
+def exec_command(
+    client: Client,
+    notebook_id: str,
+    command: str,
+    *,
+    timeout: int = 120,
+    strip_ansi: bool = True,
+) -> dict[str, Any]:
+    """Run ``command`` inside a running notebook; return stdout + exit code.
+
+    Drives the notebook's JupyterLab terminal over its WebSocket. ``timeout`` is
+    the overall wall-clock budget for the command to finish.
+    """
+    try:
+        from websocket import (
+            create_connection,
+            WebSocketTimeoutException,
+            WebSocketConnectionClosedException,
+        )
+    except ImportError:
+        raise QzError(
+            "缺少依赖 websocket-client", code="missing_dependency",
+            hint="安装: uv add websocket-client（或 pip install websocket-client）",
+        )
+
+    nb = endpoints.get_notebook(client, notebook_id)
+    if nb.get("status") != "RUNNING":
+        raise QzError(
+            f"notebook {notebook_id} 当前状态 {nb.get('status')!r}，执行命令需要 RUNNING",
+            code="invalid_notebook_state",
+            hint="先启动 notebook: qzcli nb start ...（或确认 id 正确）",
+        )
+
+    base, token = endpoints.resolve_jupyter(client, notebook_id)
+    name = endpoints.create_terminal(base, token)
+    ws_url = base.replace("https://", "wss://", 1) + f"/terminals/websocket/{name}?token={token}"
+
+    # Unique markers (avoid Date/random deps; notebook_id + name + clock is enough).
+    nonce = "QZX" + re.sub(r"[^0-9a-f]", "", notebook_id)[:8] + str(name)
+    start_mark, end_re = f"{nonce}START", re.compile(rf"{nonce}EXIT(-?\d+)END")
+    wrapped = f"echo {start_mark}; {command}; echo {nonce}EXIT$?END"
+
+    deadline = time.monotonic() + timeout
+    buf: list[str] = []
+    exit_code: Optional[int] = None
+    try:
+        ws = create_connection(
+            ws_url, header=[f"Authorization: token {token}"],
+            timeout=5, max_size=None, enable_multithread=True,
+        )
+        try:
+            # Drain the welcome banner until the shell goes idle (= ready).
+            idle_until = time.monotonic() + 0.8
+            while time.monotonic() < idle_until and time.monotonic() < deadline:
+                try:
+                    _recv_stdout(ws)
+                    idle_until = time.monotonic() + 0.8
+                except WebSocketTimeoutException:
+                    break
+                except (WebSocketConnectionClosedException, OSError):
+                    break
+            ws.send(json.dumps(["stdin", wrapped + "\n"]))
+            while time.monotonic() < deadline:
+                try:
+                    chunk = _recv_stdout(ws)
+                except WebSocketTimeoutException:
+                    continue
+                except (WebSocketConnectionClosedException, OSError):
+                    break  # shell/terminal closed (e.g. command ran `exit`)
+                if chunk is None:
+                    continue
+                buf.append(chunk)
+                m = end_re.search(_strip_ansi("".join(buf)))
+                if m:
+                    exit_code = int(m.group(1))
+                    break
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+    finally:
+        endpoints.delete_terminal(base, token, name)
+
+    raw = _strip_ansi("".join(buf))
+    stdout = _extract_between(raw, start_mark, end_re)
+    timed_out = exit_code is None
+    return {
+        "notebook_id": notebook_id,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "stdout": stdout if strip_ansi else "".join(buf),
+    }
+
+
+def _recv_stdout(ws) -> Optional[str]:
+    """Receive one terminado frame; return its stdout text or None."""
+    raw = ws.recv()
+    if not raw:
+        return None
+    try:
+        kind, *rest = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if kind == "stdout" and rest:
+        return rest[0]
+    return None
+
+
+def _extract_between(text: str, start_mark: str, end_re: re.Pattern) -> str:
+    """Return the lines between the START output marker and the END marker.
+
+    The wrapped command is one shell line, so between the two output markers
+    there is no prompt or input echo — just the command's own output.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    capturing = False
+    for ln in lines:
+        if not capturing:
+            # the *output* marker is the line equal to start_mark (not the
+            # echoed `echo ...START` input line, which has the `echo ` prefix)
+            if ln.strip() == start_mark:
+                capturing = True
+            continue
+        if end_re.search(ln):
+            break
+        out.append(ln)
+    return "\n".join(out).strip("\n")

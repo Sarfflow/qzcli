@@ -7,7 +7,10 @@ domain models (or raw dicts where there is no useful structure). They are the
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+
+import requests
 
 from ..domain.models import ComputeGroup, Image, Job, Project
 from ..errors import QzError
@@ -434,6 +437,66 @@ def estimate_save_size(client: Client, notebook_id: str) -> dict[str, Any]:
     """Estimate the size of saving a notebook's image (running notebooks only)."""
     return client.post_api("mirror/save/estimate_size",
                            {"notebook_id": notebook_id}) or {}
+
+
+# --- notebook Jupyter gateway (for `nb exec`) -----------------------------
+#
+# A running notebook is a JupyterLab server behind the gateway
+# ``nat2-notebook-inspire.sii.edu.cn``. ``resolve_jupyter`` turns a notebook id
+# into ``(base, token)`` where ``base`` ends in ``/{token}`` and every Jupyter
+# REST/WS call authenticates with ``Authorization: token {token}`` — no cookie
+# needed on the gateway, and token-header auth skips the _xsrf check. The
+# gateway is reached directly (it is not on the qz proxy path), so these helpers
+# use a proxy-less session.
+
+_JUPYTER_BASE_RE = re.compile(r"(https://[^/]+/.+?/jupyter/[^/]+/([0-9a-fA-F-]{8,}))(?:/|\?|$)")
+
+
+def resolve_jupyter(client: Client, notebook_id: str) -> tuple[str, str]:
+    """Return ``(base, token)`` for a running notebook's JupyterLab server."""
+    final = client.resolve_lab_url(notebook_id)
+    m = _JUPYTER_BASE_RE.match(final)
+    if not m:
+        raise QzError(
+            f"无法从 JupyterLab 地址解析 base/token: {final}",
+            code="bad_response",
+            hint="网关地址格式可能已变更",
+        )
+    return m.group(1), m.group(2)
+
+
+def _gateway_session() -> requests.Session:
+    """Proxy-less session for the notebook gateway (reached directly)."""
+    s = requests.Session()
+    s.trust_env = False
+    s.proxies = {}
+    return s
+
+
+def create_terminal(base: str, token: str, *, timeout: int = 20) -> str:
+    """``POST {base}/api/terminals`` → terminal name (e.g. ``"1"``)."""
+    auth = {"Authorization": f"token {token}"}
+    try:
+        r = _gateway_session().post(f"{base}/api/terminals", headers=auth, timeout=timeout)
+    except requests.RequestException as e:
+        raise QzError(f"连接 notebook 网关失败: {e}", code="network_error")
+    if r.status_code != 200:
+        raise QzError(
+            f"创建终端失败 (HTTP {r.status_code}): {r.text[:200]}",
+            code="notebook_exec_failed", http_status=r.status_code,
+        )
+    return r.json()["name"]
+
+
+def delete_terminal(base: str, token: str, name: str, *, timeout: int = 20) -> None:
+    """``DELETE {base}/api/terminals/{name}`` (best-effort cleanup)."""
+    auth = {"Authorization": f"token {token}"}
+    try:
+        _gateway_session().delete(
+            f"{base}/api/terminals/{name}", headers=auth, timeout=timeout
+        )
+    except requests.RequestException:
+        pass
 
 
 # --- cluster availability -------------------------------------------------

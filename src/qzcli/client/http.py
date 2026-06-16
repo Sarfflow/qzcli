@@ -188,6 +188,62 @@ class Client:
             )
         return result.get("data", result)
 
+    def resolve_lab_url(
+        self, notebook_id: str, *, timeout: int = 30, _retried: bool = False
+    ) -> str:
+        """Resolve a running notebook's JupyterLab URL (with auth token).
+
+        ``GET /api/v1/notebook/lab/{id}/`` is a page-level proxy route: the qz
+        server mints a per-session token and 302s to the notebook gateway
+        ``nat2-notebook-inspire.sii.edu.cn/{ws}/{project}/{user}/jupyter/{id}/
+        {token}/lab?token={token}``. We walk the redirects (through the proxy,
+        same as every other qz call) and stop at the gateway hop *without*
+        fetching it, returning that URL. Both the base and the token are
+        derived from it (see :func:`endpoints.resolve_jupyter`).
+
+        The route needs a *fresh* keycloak-backed session — a stale cookie that
+        still works for ``/api/v2`` will 401 here; we relogin once and retry.
+        """
+        cur = f"{self.base_url}/api/v1/notebook/lab/{notebook_id}/"
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": _BROWSER_UA,
+        }
+        for _ in range(8):
+            try:
+                resp = self._session.get(
+                    cur,
+                    headers={**headers, "cookie": self.require_cookie()},
+                    allow_redirects=False,
+                    timeout=timeout,
+                )
+            except requests.RequestException as e:
+                raise QzError(f"请求失败: {e}", code="network_error", hint="检查网络/代理设置")
+
+            if resp.status_code == 401:
+                if not _retried and self._relogin():
+                    return self.resolve_lab_url(
+                        notebook_id, timeout=timeout, _retried=True
+                    )
+                raise QzError(
+                    "Cookie 已过期或无效", code="auth_expired",
+                    hint="重新登录: qzcli login", http_status=401,
+                )
+            if resp.status_code in (301, 302, 303, 307, 308):
+                nxt = requests.compat.urljoin(cur, resp.headers.get("location", ""))
+                if "/jupyter/" in nxt:
+                    return nxt
+                cur = nxt
+                continue
+            raise QzError(
+                f"无法解析 notebook 的 JupyterLab 地址 (HTTP {resp.status_code})",
+                code="invalid_notebook_state",
+                hint="notebook 可能未在运行；先 qzcli nb get <id> 确认 status=RUNNING",
+                http_status=resp.status_code,
+            )
+        raise QzError("解析 JupyterLab 地址时重定向过多", code="bad_response")
+
     def post_v2(
         self,
         service: str,
