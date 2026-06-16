@@ -90,10 +90,15 @@ hid some). `--top 0` = all spare-capacity nodes; `--all` = every node in the fle
 `--table` prints the per-node rows.
 
 ### `create [--dry-run]  (required: --name -w -g --image --cmd)`
-Options: `--project`, `--quota-id`, `--cpu`, `--gpu`, `--mem`, `--framework`
-(default `pytorch`), `--image-type` (default: the image's source), `--instances`
-(default 1), `--shm` GiB (default: spec memory), `--priority` 1–10 (default 10),
-`--no-image-check`, `--dataset id[:version]` (repeatable).
+Options: `--project` (id / 中文名 / en_name), `--quota-id`, `--cpu`, `--gpu`, `--mem`,
+`--framework` (default `pytorch`), `--image-type` (default: the image's source),
+`--instances` (default 1), `--shm` GiB (default: spec memory), `--priority` 1–10
+(default 10 — a project may cap this; on `priority_too_high` lower it), `--no-image-check`,
+`--dataset id[:version]` (repeatable), `--wait/--no-wait`, `--timeout`.
+- **Blocks until the job is running by default** (qzcli polls; queue time is not
+  charged against `--timeout`, default 600s). Adds `wait:{final_status,reached,
+  timed_out,active_s,queued_s}`. `--no-wait` returns at submit. Run long ones with
+  the shell backgrounded → zero tokens spent waiting. job_failed → `job_failed`.
 - → `data: {job_id, workspace_id, name, url, resolved}`
 - `--dry-run` → `data: {dry_run: true, resolved, payload}`, submits nothing —
   optional preview of inferred values (project / image_type / shm / spec).
@@ -174,6 +179,12 @@ Running first. `notebook_id` (uuid) is the handle for the other `nb` commands.
 → `data: [ {quota_id, gpu_type, gpu_count, cpu_count, memory_gb, total_price_per_hour} ]`
 DSW (interactive-modeling) quotas for the 机房. Pick a `quota_id`.
 
+**Blocking by default:** `nb start` / `nb stop` / `nb save-image` (and `nb rm --stop`)
+block until the target state (RUNNING / STOPPED / image SUCCESS) or `--timeout`
+(default 600s ACTIVE; queue not counted); `--no-wait` returns immediately. Each
+adds a `wait:{final_status,reached,timed_out,active_s,queued_s}` block. Run them
+with the shell backgrounded to spend zero tokens while waiting.
+
 ### `nb start --name N -w <ws> -g <lcg> --image ADDR [--dry-run]`
 Options: `--project` (multi-project ws), `--quota-id` (from `nb specs`),
 `--cpu/--gpu/--mem`, `--shm`, `--priority` (default 6), `--auto-stop`.
@@ -192,23 +203,30 @@ deps, and smoke-test before `save-image`.
   statement's `$?`; `stdout` is the merged stdout+stderr (it's a PTY), cleaned of
   ANSI/banner/prompt. `--raw` returns the unprocessed terminal text.
 - `--timeout S` (default 120) is the overall wall-clock budget; on overrun
-  `timed_out:true`, `exit_code:null`.
-- Quote/`--` the command: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
+  `timed_out:true`, `exit_code:null`. **Put `--timeout`/`--raw` before the id**
+  (`nb exec --timeout 600 <id> -- ...`), like `kubectl exec`; the command goes
+  after `--`.
+- The command form is `nb exec <id> -- <cmd>`: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
+- On official images pip may refuse with PEP 668 — use `pip install --break-system-packages`.
 - Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
   `exit`; for env changes to persist into an image, `save-image` after.
 
 ### `nb save-image NOTEBOOK_ID --name N --version V`
-Save a **RUNNING** notebook as a private personal image (`accessible=1`). Async —
-poll `nb get`'s `save_mirror_status` (BUILDING→SUCCESS). The image then appears in
-`options images` (PRIVATE) and is usable as `create --image`. Can't stop the
-notebook while a save is BUILDING.
+Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks
+until the build reaches SUCCESS by default (`--no-wait` to return at submit). The
+image then appears in `options images` (PRIVATE) and is usable as `create --image`.
+Can't stop the notebook while a save is BUILDING.
 
 ### `nb stop NOTEBOOK_ID`
-→ `data: {stopped, result}`. Stop is async (RUNNING→STOPPED).
+→ `data: {stopped, result, wait}`. Blocks until STOPPED by default.
 
 ### `nb rm NOTEBOOK_ID [--stop]`
 Delete a notebook — the platform requires it be STOPPED/FAILED first. `--stop`
 stops it and waits for STOPPED, then deletes.
+
+### `nb rm-image image-<id>`  (or `<name>/<address> -w <ws>`)
+Delete a personal image. Pass the `image_id` (`image-…`, from `options images`)
+directly, or a name/address plus `-w <ws>` to resolve it.
 
 ## Error codes (`error.code`)
 
@@ -225,6 +243,8 @@ stops it and waits for STOPPED, then deletes.
 | `invalid_dataset` | dataset/version ref bad | fix the ref (see message) |
 | `invalid_notebook` / `invalid_notebook_state` | bad notebook id, or wrong status for the op | `qzcli nb ls`; save/exec need RUNNING, rm needs STOPPED |
 | `notebook_exec_failed` | notebook gateway rejected the terminal/exec | confirm `nb get` status=RUNNING; retry |
+| `notebook_failed` / `job_failed` / `save_image_failed` | resource reached a failure state while waiting | `nb get` / `logs` / `events` for the cause |
+| `priority_too_high` | `--priority` exceeds the project's cap | retry with a lower `--priority` |
 | `invalid_job` | bad/unknown JOB_ID | `qzcli ls -w <ws>` for valid ids |
 | `no_instances` | job has no scheduled pods yet | `qzcli instances <job_id>` / wait |
 | `no_specs` / `no_compute_groups` / `no_workspaces` | nothing available | see `hint` |

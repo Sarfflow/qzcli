@@ -161,7 +161,7 @@ def test_no_dataset_means_empty_dataset_info():
 def test_submit_runs_prepare_then_posts():
     c = _full_client()
     c.responses["train_job/create"] = {"job_id": "job-new", "workspace_id": "ws-001"}
-    out = create_core.submit(c, _req())
+    out = create_core.submit(c, _req(), wait=False)  # wait path covered in test_wait
     assert out["job_id"] == "job-new"
     assert "distributedTrainingDetail/job-new" in out["url"]
     # the create POST actually happened

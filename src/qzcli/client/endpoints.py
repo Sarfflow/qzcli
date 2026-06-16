@@ -368,6 +368,11 @@ def list_images(
 
 # --- notebooks (interactive modeling) -------------------------------------
 
+def delete_image(client: Client, image_id: str) -> Any:
+    """Delete an image by id (``DELETE /api/v1/image/{image_id}``)."""
+    return client.delete_api(f"image/{image_id}")
+
+
 def list_notebooks(
     client: Client, workspace_id: str, *, page: int = 0, page_size: int = 100
 ) -> list[dict[str, Any]]:

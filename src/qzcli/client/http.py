@@ -188,6 +188,51 @@ class Client:
             )
         return result.get("data", result)
 
+    def delete_api(
+        self,
+        path: str,
+        *,
+        referer: Optional[str] = None,
+        timeout: int = 60,
+        _retried: bool = False,
+    ) -> Any:
+        """``DELETE /api/v1/<path>`` (cookie-authed), same ``{code,data}`` envelope."""
+        url = f"{self.base_url}/api/v1/{path.lstrip('/')}"
+        try:
+            resp = self._session.delete(
+                url, headers=self._headers(referer), timeout=timeout
+            )
+        except requests.RequestException as e:
+            raise QzError(f"请求失败: {e}", code="network_error", hint="检查网络/代理设置")
+
+        if resp.status_code == 401:
+            if not _retried and self._relogin():
+                return self.delete_api(path, referer=referer, timeout=timeout, _retried=True)
+            raise QzError(
+                "Cookie 已过期或无效", code="auth_expired",
+                hint="重新登录: qzcli login", http_status=401,
+            )
+        if resp.status_code != 200:
+            raise QzError(
+                f"HTTP {resp.status_code}: {resp.text[:200]}",
+                code="http_error", http_status=resp.status_code,
+                hint="确认 endpoint 仍有效；接口可能已变更",
+            )
+        try:
+            result = resp.json()
+        except ValueError:
+            raise QzError("响应不是有效 JSON", code="bad_response",
+                          hint="cookie 可能失效，尝试 qzcli login")
+        if isinstance(result, dict):
+            code = result.get("code")
+            if code not in (0, None):
+                raise QzError(
+                    f"API 返回错误: {result.get('message', '未知错误')}",
+                    code="api_error", hint=f"平台错误码 {code}",
+                )
+            return result.get("data", result)
+        return result
+
     def resolve_lab_url(
         self, notebook_id: str, *, timeout: int = 30, _retried: bool = False
     ) -> str:

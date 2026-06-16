@@ -29,6 +29,13 @@ class FakeClient:
         self.calls.append((f"v2:{action}", body))
         return self.responses.get(f"v2:{action}", {})
 
+    def delete_api(self, path: str, *, referer=None, timeout: int = 60, _retried: bool = False):
+        self.calls.append((f"DELETE {path}", {}))
+        for key, value in self.responses.items():
+            if key in path:
+                return value
+        return {}
+
     def require_cookie(self) -> str:
         return "fake=cookie"
 

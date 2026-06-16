@@ -20,6 +20,16 @@ from ..client.http import Client
 from ..domain.models import Spec
 from ..errors import QzError
 from . import options
+from . import wait as waitlib
+
+
+def _notebook_status(client: Client, notebook_id: str) -> str:
+    return endpoints.get_notebook(client, notebook_id).get("status") or ""
+
+
+def _save_status(client: Client, notebook_id: str) -> str:
+    nb = endpoints.get_notebook(client, notebook_id)
+    return (nb.get("save_mirror_status") or {}).get("status") or ""
 
 # Defaults observed in the web CreateNotebook payload.
 DEFAULT_RUNTIME = "standard"
@@ -111,21 +121,17 @@ def rooms(client: Client, workspace_id: str) -> list[dict[str, Any]]:
 
 
 def delete(client: Client, notebook_id: str, *, stop_first: bool = False,
-           timeout_s: int = 180) -> dict[str, Any]:
+           timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
     """Delete a notebook. The platform only deletes STOPPED/FAILED notebooks;
     ``stop_first`` stops it and waits for STOPPED before deleting."""
-    if stop_first:
-        nb = endpoints.get_notebook(client, notebook_id)
-        if nb.get("status") not in ("STOPPED", "FAILED"):
-            endpoints.stop_notebook(client, notebook_id)
-            import time
-            deadline = timeout_s
-            while deadline > 0:
-                if endpoints.get_notebook(client, notebook_id).get("status") in ("STOPPED", "FAILED"):
-                    break
-                time.sleep(6)
-                deadline -= 6
-    return endpoints.delete_notebook(client, notebook_id)
+    out: dict[str, Any] = {}
+    if stop_first and _notebook_status(client, notebook_id) not in ("STOPPED", "FAILED"):
+        endpoints.stop_notebook(client, notebook_id)
+        out["wait"] = waitlib.wait_until(
+            lambda: _notebook_status(client, notebook_id),
+            waitlib.classify_notebook_stopped, timeout_s=timeout_s)
+    out["result"] = endpoints.delete_notebook(client, notebook_id)
+    return out
 
 
 def compute_groups(client: Client, workspace_id: str) -> list[dict[str, Any]]:
@@ -237,7 +243,7 @@ def _resolve_ws_project(client: Client, workspace: str, project: Optional[str]):
     owners = [p for p in projects if any(s.id == ws_id for s in p.spaces)]
     cands = [{"id": p.id, "name": p.name} for p in owners]
     if project:
-        match = [p for p in owners if project in (p.id, p.name)] or \
+        match = [p for p in owners if project in (p.id, p.name, p.en_name)] or \
                 [p for p in owners if project.lower() in p.name.lower()]
         if len(match) != 1:
             raise QzError(f"项目 '{project}' 不唯一或不拥有该工作空间",
@@ -302,21 +308,48 @@ def build_start_payload(client: Client, req: NotebookStartRequest) -> dict[str, 
     return {"resolved": resolved, "payload": payload}
 
 
-def start(client: Client, req: NotebookStartRequest, *, dry_run: bool = False) -> dict[str, Any]:
+def start(client: Client, req: NotebookStartRequest, *, dry_run: bool = False,
+          wait: bool = True, timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
     prepared = build_start_payload(client, req)
     if dry_run:
         return {"dry_run": True, **prepared}
     res = endpoints.create_notebook(client, prepared["payload"])
     nid = (res.get("notebook_id") or res.get("id")
            or (res.get("notebook") or {}).get("notebook_id", ""))
-    return {"notebook_id": nid, "name": req.name,
-            "workspace_id": prepared["resolved"]["workspace_id"],
-            "resolved": prepared["resolved"], "result": res}
+    out = {"notebook_id": nid, "name": req.name,
+           "workspace_id": prepared["resolved"]["workspace_id"],
+           "resolved": prepared["resolved"], "result": res}
+    if wait and nid:
+        w = waitlib.wait_until(
+            lambda: _notebook_status(client, nid),
+            waitlib.classify_notebook_running, timeout_s=timeout_s)
+        out["wait"] = w
+        if w["failed"]:
+            raise QzError(
+                f"notebook {nid} 启动失败，最终状态 {w['final_status']!r}",
+                code="notebook_failed",
+                hint=f"查看原因: qzcli nb get {nid}",
+            )
+    return out
+
+
+def stop(client: Client, notebook_id: str, *, wait: bool = True,
+         timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    """Stop a notebook; by default block until STOPPED."""
+    res = endpoints.stop_notebook(client, notebook_id)
+    out = {"stopped": notebook_id, "result": res}
+    if wait:
+        out["wait"] = waitlib.wait_until(
+            lambda: _notebook_status(client, notebook_id),
+            waitlib.classify_notebook_stopped, timeout_s=timeout_s)
+    return out
 
 
 def save_image(client: Client, notebook_id: str, name: str, version: str,
-               *, accessible: int = 1) -> dict[str, Any]:
-    """Save a RUNNING notebook as a personal image."""
+               *, accessible: int = 1, wait: bool = True,
+               timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    """Save a RUNNING notebook as a personal image; by default block until the
+    image build reaches SUCCESS."""
     nb = endpoints.get_notebook(client, notebook_id)
     if nb.get("status") != "RUNNING":
         raise QzError(
@@ -325,8 +358,20 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
             hint="先启动 notebook（保存的是运行容器的当前状态）",
         )
     res = endpoints.save_notebook_image(client, notebook_id, name, version, accessible=accessible)
-    return {"notebook_id": notebook_id, "image_name": name, "version": version,
-            "accessible": accessible, "result": res}
+    out = {"notebook_id": notebook_id, "image_name": name, "version": version,
+           "accessible": accessible, "result": res}
+    if wait:
+        w = waitlib.wait_until(
+            lambda: _save_status(client, notebook_id),
+            waitlib.classify_save, timeout_s=timeout_s)
+        out["wait"] = w
+        if w["failed"]:
+            raise QzError(
+                f"镜像构建失败，save_mirror_status={w['final_status']!r}",
+                code="save_image_failed",
+                hint=f"通常是构建中途被停/基础镜像问题；qzcli nb get {notebook_id} 看详情",
+            )
+    return out
 
 
 # --- nb exec --------------------------------------------------------------

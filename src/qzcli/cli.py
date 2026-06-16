@@ -23,6 +23,7 @@ from .core import avail as avail_core
 from .core import create as create_core
 from .core import notebook as notebook_core
 from .core import options as options_core
+from .core import wait as wait_core
 from .errors import QzError
 
 
@@ -257,17 +258,45 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
             cpu=args.cpu, gpu=args.gpu, mem=args.mem, shm=args.shm,
             priority=args.priority, auto_stop=args.auto_stop,
         )
-        return notebook_core.start(client, req, dry_run=args.dry_run), None
+        return notebook_core.start(
+            client, req, dry_run=args.dry_run,
+            wait=args.wait, timeout_s=args.timeout), None
     if args.nb_target == "stop":
-        res = endpoints.stop_notebook(client, args.notebook_id)
-        return {"stopped": args.notebook_id, "result": res}, None
+        return notebook_core.stop(
+            client, args.notebook_id, wait=args.wait, timeout_s=args.timeout), None
     if args.nb_target == "rm":
-        res = notebook_core.delete(client, args.notebook_id, stop_first=args.stop)
-        return {"deleted": args.notebook_id, "result": res}, None
+        res = notebook_core.delete(
+            client, args.notebook_id, stop_first=args.stop, timeout_s=args.timeout)
+        return {"deleted": args.notebook_id, **res}, None
     if args.nb_target == "save-image":
         return notebook_core.save_image(
             client, args.notebook_id, args.name, args.version,
+            wait=args.wait, timeout_s=args.timeout,
         ), None  # accessible=1 (private personal image — the confirmed common case)
+    if args.nb_target == "rm-image":
+        ref = args.image
+        if ref.startswith("image-"):
+            image_id = ref
+        else:
+            if not args.workspace:
+                raise QzError(
+                    "按名称删除镜像需要 -w <ws> 来解析 image_id",
+                    code="usage_error", hint="或直接传 image-<id>（见 options images）",
+                )
+            ws_id, _ = _resolved_ws(client, args.workspace)
+            imgs = endpoints.list_images(client, ws_id, source="ALL")
+            match = [im for im in imgs if ref in (im.address, im.name)]
+            if len(match) != 1:
+                raise QzError(
+                    f"镜像 '{ref}' 未在该空间唯一匹配（{len(match)} 个）",
+                    code="invalid_image",
+                    hint="直接传 image-<id>，或用 qzcli options images 查 address",
+                    candidates=[{"name": im.name, "address": im.address,
+                                 "image_id": im.image_id} for im in imgs][:20],
+                )
+            image_id = match[0].image_id
+        res = endpoints.delete_image(client, image_id)
+        return {"deleted_image": image_id, "result": res}, None
     if args.nb_target == "exec":
         cmd_parts = list(args.command or [])
         if cmd_parts and cmd_parts[0] == "--":
@@ -327,7 +356,7 @@ def cmd_create(args) -> tuple[Any, Optional[list[str]]]:
     )
     if args.dry_run:
         return create_core.dry_run(client, req), None
-    return create_core.submit(client, req), None
+    return create_core.submit(client, req, wait=args.wait, timeout_s=args.timeout), None
 
 
 def cmd_ls(args) -> tuple[Any, Optional[list[str]]]:
@@ -362,8 +391,7 @@ def cmd_logs(args) -> tuple[Any, Optional[list[str]]]:
 
 def cmd_stop(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
-    result = endpoints.stop_job(client, args.job_id)
-    return {"stopped": args.job_id, "result": result}, None
+    return create_core.stop(client, args.job_id, wait=args.wait, timeout_s=args.timeout), None
 
 
 def cmd_events(args) -> tuple[Any, Optional[list[str]]]:
@@ -440,6 +468,19 @@ class JsonArgumentParser(argparse.ArgumentParser):
         # --table isn't parsed yet at error time; JSON is the contract default.
         output.emit_error(err, table=False)
         raise SystemExit(1)
+
+
+def _add_wait_flags(p: argparse.ArgumentParser) -> None:
+    """Add the blocking-wait flags shared by long-running commands.
+
+    Default: block (qzcli polls) until the resource reaches its target state or
+    the ACTIVE budget runs out. Queue time is never charged against --timeout.
+    Tip: run these with the shell in the background to spend zero tokens waiting.
+    """
+    p.add_argument("--wait", action=argparse.BooleanOptionalAction, default=True,
+                   help="阻塞直到达到目标状态/超时（默认开；--no-wait 提交即返回）")
+    p.add_argument("--timeout", type=int, default=wait_core.DEFAULT_TIMEOUT_S,
+                   help="ACTIVE 阶段超时秒数（默认 600；排队不计入）")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -537,25 +578,34 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--priority", type=int, default=notebook_core.DEFAULT_PRIORITY)
     n.add_argument("--auto-stop", dest="auto_stop", action="store_true")
     n.add_argument("--dry-run", action="store_true", help="只校验+预览 payload，不创建")
+    _add_wait_flags(n)  # default: block until RUNNING
     n.set_defaults(func=cmd_nb)
-    n = nsub.add_parser("stop", help="停止 notebook")
+    n = nsub.add_parser("stop", help="停止 notebook（默认阻塞至 STOPPED）")
     n.add_argument("notebook_id")
+    _add_wait_flags(n)
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser("rm", help="删除 notebook（需先 STOPPED；--stop 自动停后再删）")
     n.add_argument("notebook_id")
     n.add_argument("--stop", action="store_true", help="先停止并等待 STOPPED 再删除")
+    n.add_argument("--timeout", type=int, default=wait_core.DEFAULT_TIMEOUT_S,
+                   help="--stop 时等待 STOPPED 的 ACTIVE 超时秒数（默认 600）")
     n.set_defaults(func=cmd_nb)
-    n = nsub.add_parser("save-image", help="把运行中的 notebook 存为个人镜像（私有）")
+    n = nsub.add_parser("save-image", help="把运行中的 notebook 存为个人镜像（私有；默认阻塞至 SUCCESS）")
     n.add_argument("notebook_id")
     n.add_argument("--name", required=True, help="镜像名")
     n.add_argument("--version", required=True, help="镜像版本 tag")
+    _add_wait_flags(n)  # default: block until image build SUCCESS
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("rm-image", help="删除个人镜像（image-<id>，或 -w + 名称/address）")
+    n.add_argument("image", help="image_id（image-…）或镜像 name/address（需配 -w）")
+    n.add_argument("-w", "--workspace", help="按名称/address 解析 image_id 时需要")
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser(
         "exec", help="在运行中的 notebook 内执行命令（走 Jupyter 终端，无需 SSH）"
     )
     n.add_argument("notebook_id")
-    n.add_argument("command", nargs=argparse.REMAINDER,
-                   help="要执行的命令；建议用 -- 分隔，如 nb exec <id> -- pip list")
+    n.add_argument("command", nargs="*",
+                   help="要执行的命令；用 -- 分隔，如 nb exec <id> -- pip list")
     n.add_argument("--timeout", type=int, default=120, help="整体超时秒数（默认 120）")
     n.add_argument("--raw", action="store_true",
                    help="返回原始终端输出（保留 ANSI/banner，不裁剪）")
@@ -586,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="挂载数据集 dataset_id 或 dataset_id:version_id，可重复（提交前自动校验）")
     sp.add_argument("--dry-run", action="store_true",
                     help="只校验+预览 payload，不提交")
+    _add_wait_flags(sp)  # default: block until job_running (queue not counted)
     sp.set_defaults(func=cmd_create)
 
     sp = sub.add_parser("ls", help="任务列表")
@@ -599,8 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=200, help="取最近 N 条（最新在后）")
     sp.set_defaults(func=cmd_logs)
 
-    sp = sub.add_parser("stop", help="停止任务")
+    sp = sub.add_parser("stop", help="停止任务（默认阻塞至终态）")
     sp.add_argument("job_id")
+    _add_wait_flags(sp)
     sp.set_defaults(func=cmd_stop)
 
     sp = sub.add_parser("events", help="任务/实例事件（最新优先，重复事件折叠计数）")

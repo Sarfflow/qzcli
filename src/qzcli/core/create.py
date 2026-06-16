@@ -22,6 +22,7 @@ from ..client.http import Client
 from ..domain.models import Spec
 from ..errors import QzError
 from . import options
+from . import wait as waitlib
 
 DEFAULT_FRAMEWORK = "pytorch"
 DEFAULT_IMAGE_TYPE = "SOURCE_PRIVATE"
@@ -197,7 +198,7 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
     project_source = "explicit"
 
     if req.project:
-        match = [p for p in owners if req.project in (p.id, p.name)]
+        match = [p for p in owners if req.project in (p.id, p.name, p.en_name)]
         if not match:
             match = [p for p in owners if req.project.lower() in p.name.lower()]
         if len(match) != 1:
@@ -307,10 +308,24 @@ def dry_run(client: Client, req: CreateRequest) -> dict[str, Any]:
     return {"dry_run": True, **prepared}
 
 
-def submit(client: Client, req: CreateRequest) -> dict[str, Any]:
-    """Run the same read step, then POST only if it passed."""
+def submit(client: Client, req: CreateRequest, *, wait: bool = True,
+           timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    """Run the same read step, then POST only if it passed.
+
+    By default block (qzcli-side polling) until the job is running — queue time
+    is not charged against ``timeout_s`` (a job can sit queued for a day).
+    """
     prepared = prepare(client, req)
-    result = endpoints.create_job(client, prepared["payload"])
+    try:
+        result = endpoints.create_job(client, prepared["payload"])
+    except QzError as e:
+        if "优先级" in (e.message or ""):
+            raise QzError(
+                f"任务优先级 {req.priority} 超过项目允许上限",
+                code="priority_too_high",
+                hint="降低 --priority 重试（项目对任务优先级设了上限；越大优先级越高）",
+            ) from e
+        raise
     job_id = result.get("job_id", "")
     workspace_id = result.get("workspace_id") or prepared["resolved"]["workspace_id"]
     if not job_id:
@@ -319,7 +334,7 @@ def submit(client: Client, req: CreateRequest) -> dict[str, Any]:
             code="create_failed",
             hint=f"平台原始响应: {result}",
         )
-    return {
+    out = {
         "job_id": job_id,
         "workspace_id": workspace_id,
         "name": req.name,
@@ -329,3 +344,27 @@ def submit(client: Client, req: CreateRequest) -> dict[str, Any]:
         ),
         "resolved": prepared["resolved"],
     }
+    if wait:
+        w = waitlib.wait_until(
+            lambda: endpoints.job_detail(client, job_id).get("status") or "",
+            waitlib.classify_job_started, timeout_s=timeout_s)
+        out["wait"] = w
+        if w["failed"]:
+            raise QzError(
+                f"任务 {job_id} 启动失败，最终状态 {w['final_status']!r}",
+                code="job_failed",
+                hint=f"查看原因: qzcli logs {job_id} / qzcli events {job_id}",
+            )
+    return out
+
+
+def stop(client: Client, job_id: str, *, wait: bool = True,
+         timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    """Stop a job; by default block until it reaches a terminal state."""
+    result = endpoints.stop_job(client, job_id)
+    out = {"stopped": job_id, "result": result}
+    if wait:
+        out["wait"] = waitlib.wait_until(
+            lambda: endpoints.job_detail(client, job_id).get("status") or "",
+            waitlib.classify_job_stopped, timeout_s=timeout_s)
+    return out
