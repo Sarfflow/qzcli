@@ -123,8 +123,9 @@ a job's `detail.dataset_info`). Version is effectively required; omitting it oft
 fails (default-version resolution is dataset-dependent).
 
 ### `ls -w <ws> [--running] [--limit N]`
-→ `data: {total, jobs: [{job_id, name, status, workspace_id, project_id, logic_compute_group_id, created_at}]}`
-Job `status` is **`job_`-prefixed**: `job_queuing` / `job_creating` / `job_running`
+→ `data: {total, jobs: [{job_id, name, status, workspace_id, project_id, project_name, logic_compute_group_id, created_at}]}`
+`project_name` is echoed (workspaces are shared across projects, so the id alone
+is ambiguous). Job `status` is **`job_`-prefixed**: `job_queuing` / `job_creating` / `job_running`
 / `job_succeeded` / `job_failed` / `job_stopped`. (Match on these exact strings —
 they are NOT the bare `RUNNING`/`SUCCEEDED` forms.) `--running` filters to running.
 
@@ -203,7 +204,9 @@ DSW (interactive-modeling) quotas for the 机房. Pick a `quota_id`.
 block until the target state (RUNNING / STOPPED / image SUCCESS) or `--timeout`
 (default 600s ACTIVE; queue not counted); `--no-wait` returns immediately. Each
 adds a `wait:{final_status,reached,timed_out,active_s,queued_s}` block. Run them
-with the shell backgrounded to spend zero tokens while waiting.
+with the shell backgrounded to spend zero tokens while waiting. While blocking,
+a heartbeat line is written to **stderr** every ~30s (status + elapsed; queue
+time flagged) so a watcher sees progress — the stdout JSON result is unaffected.
 
 ### `nb start --name N -w <ws> -g <lcg> --image ADDR [--dry-run]`
 Options: `--project` (multi-project ws), `--quota-id` (from `nb specs`),

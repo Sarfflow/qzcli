@@ -358,7 +358,8 @@ def submit(client: Client, req: CreateRequest, *, wait: bool = True,
     if wait:
         w = waitlib.wait_until(
             lambda: endpoints.job_detail(client, job_id).get("status") or "",
-            waitlib.classify_job_started, timeout_s=timeout_s)
+            waitlib.classify_job_started, timeout_s=timeout_s,
+            label=f"job {job_id}")
         out["wait"] = w
         if w["failed"]:
             raise QzError(
@@ -377,5 +378,6 @@ def stop(client: Client, job_id: str, *, wait: bool = True,
     if wait:
         out["wait"] = waitlib.wait_until(
             lambda: endpoints.job_detail(client, job_id).get("status") or "",
-            waitlib.classify_job_stopped, timeout_s=timeout_s)
+            waitlib.classify_job_stopped, timeout_s=timeout_s,
+            label=f"job {job_id} stop")
     return out

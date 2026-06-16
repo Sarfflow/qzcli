@@ -372,6 +372,13 @@ def cmd_ls(args) -> tuple[Any, Optional[list[str]]]:
         jobs = [j for j in jobs if "RUN" in str(j.get("status", "")).upper()]
     from .domain.models import Job
     rows = [Job.from_api(j).to_dict() for j in jobs]
+    # Workspaces are shared across projects, so echo project_name (not just the
+    # opaque project_id) to help confirm a row is your own project's job.
+    if rows:
+        names = {p.id: p.name for p in endpoints.list_projects(client)}
+        for r in rows:
+            if r.get("project_id") and not r.get("project_name"):
+                r["project_name"] = names.get(r["project_id"], "")
     return {"total": data.get("total", len(rows)), "jobs": rows}, None
 
 

@@ -102,3 +102,27 @@ def test_classify_job_started(status, expected):
 ])
 def test_classify_save(status, expected):
     assert wait.classify_save(status) == expected
+
+
+def test_heartbeat_fires_to_stderr(monkeypatch, capsys):
+    # drive a fake clock via the injected sleep so the heartbeat throttle trips
+    clock = {"t": 0.0}
+    monkeypatch.setattr(wait.time, "monotonic", lambda: clock["t"])
+    def sleep(s): clock["t"] += s
+    poll = _seq_poller(["PENDING"] * 5 + ["RUNNING"])
+    r = wait.wait_until(poll, wait.classify_notebook_running, timeout_s=600,
+                        interval_s=20, max_interval_s=20, sleep=sleep,
+                        label="job x", heartbeat_s=30)
+    assert r["reached"]
+    err = capsys.readouterr().err
+    assert "[qzcli]" in err and "job x" in err and "queued" in err
+
+
+def test_heartbeat_silent_when_disabled(monkeypatch, capsys):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(wait.time, "monotonic", lambda: clock["t"])
+    def sleep(s): clock["t"] += s
+    poll = _seq_poller(["PENDING"] * 5 + ["RUNNING"])
+    wait.wait_until(poll, wait.classify_notebook_running, timeout_s=600,
+                    interval_s=20, sleep=sleep, heartbeat_s=0)
+    assert "[qzcli]" not in capsys.readouterr().err

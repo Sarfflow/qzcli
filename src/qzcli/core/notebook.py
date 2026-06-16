@@ -129,7 +129,8 @@ def delete(client: Client, notebook_id: str, *, stop_first: bool = False,
         endpoints.stop_notebook(client, notebook_id)
         out["wait"] = waitlib.wait_until(
             lambda: _notebook_status(client, notebook_id),
-            waitlib.classify_notebook_stopped, timeout_s=timeout_s)
+            waitlib.classify_notebook_stopped, timeout_s=timeout_s,
+            label=f"nb {notebook_id} stop")
     out["result"] = endpoints.delete_notebook(client, notebook_id)
     return out
 
@@ -322,7 +323,8 @@ def start(client: Client, req: NotebookStartRequest, *, dry_run: bool = False,
     if wait and nid:
         w = waitlib.wait_until(
             lambda: _notebook_status(client, nid),
-            waitlib.classify_notebook_running, timeout_s=timeout_s)
+            waitlib.classify_notebook_running, timeout_s=timeout_s,
+            label=f"nb {nid} start")
         out["wait"] = w
         if w["failed"]:
             raise QzError(
@@ -341,7 +343,8 @@ def stop(client: Client, notebook_id: str, *, wait: bool = True,
     if wait:
         out["wait"] = waitlib.wait_until(
             lambda: _notebook_status(client, notebook_id),
-            waitlib.classify_notebook_stopped, timeout_s=timeout_s)
+            waitlib.classify_notebook_stopped, timeout_s=timeout_s,
+            label=f"nb {notebook_id} stop")
     return out
 
 
@@ -363,7 +366,8 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
     if wait:
         w = waitlib.wait_until(
             lambda: _save_status(client, notebook_id),
-            waitlib.classify_save, timeout_s=timeout_s)
+            waitlib.classify_save, timeout_s=timeout_s,
+            label=f"save-image {name}:{version}")
         out["wait"] = w
         if w["failed"]:
             raise QzError(

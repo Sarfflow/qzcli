@@ -23,6 +23,7 @@ platform state never silently breaks the loop.
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any, Callable
 
@@ -42,17 +43,25 @@ def wait_until(
     interval_s: float = 3.0,
     max_interval_s: float = 20.0,
     sleep: Callable[[float], None] = time.sleep,
+    label: str = "",
+    heartbeat_s: float = 30.0,
 ) -> dict[str, Any]:
     """Poll ``poll()`` until ``classify`` says OK/FAIL, or ACTIVE time runs out.
 
     ``poll`` returns the current raw status string; ``classify`` maps it to one
     of QUEUED/ACTIVE/OK/FAIL. Returns a result dict (see ``_result``). Time spent
     in QUEUED states is tracked separately and never triggers the timeout.
+
+    While waiting, a heartbeat line is written to STDERR every ~``heartbeat_s``
+    real seconds (so a human / `/workflows` watcher sees progress; stdout's JSON
+    result is untouched). Throttled by the real clock, so deterministic tests
+    that inject a no-op ``sleep`` never emit one. Set ``heartbeat_s=0`` to silence.
     """
     active_s = 0.0
     queued_s = 0.0
     interval = float(interval_s)
     polls = 0
+    last_beat = time.monotonic()
 
     status = poll()
     polls += 1
@@ -65,11 +74,23 @@ def wait_until(
             active_s += interval
         else:
             queued_s += interval
+        if heartbeat_s > 0 and (time.monotonic() - last_beat) >= heartbeat_s:
+            _heartbeat(label, status, cat, active_s, queued_s)
+            last_beat = time.monotonic()
         interval = min(interval * 1.5, max_interval_s)
         status = poll()
         polls += 1
         cat = classify(status)
     return _result(status, cat, active_s, queued_s, polls)
+
+
+def _heartbeat(label: str, status: str, cat: str, active_s: float, queued_s: float) -> None:
+    what = f"{label} " if label else ""
+    if cat == QUEUED:
+        tail = f"queued {int(queued_s)}s (排队不计入超时)"
+    else:
+        tail = f"active {int(active_s)}s"
+    print(f"[qzcli] {what}waiting… status={status or '?'}, {tail}", file=sys.stderr, flush=True)
 
 
 def _result(
