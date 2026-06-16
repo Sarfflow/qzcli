@@ -158,6 +158,10 @@ def cmd_options(args) -> tuple[Any, Optional[list[str]]]:
             )
         images = options_core.images(client, ws_id, source=args.source)
         rows = [im.to_dict() for im in images]
+        if getattr(args, "name", None):
+            q = args.name.lower()
+            rows = [r for r in rows if q in str(r.get("name", "")).lower()
+                    or q in str(r.get("address", "")).lower()]
         if not args.verbose:
             # `creator` is a heavy nested object; `address` is all create needs.
             for r in rows:
@@ -422,8 +426,18 @@ def cmd_events(args) -> tuple[Any, Optional[list[str]]]:
     return rows, ["last_timestamp", "type", "reason", "count", "from", "message"]
 
 
+_DETAIL_BRIEF_KEYS = [
+    "job_id", "name", "status", "project_name", "framework", "gpu_count",
+    "logic_compute_group_name", "task_priority", "created_at", "finished_at",
+]
+
+
 def cmd_detail(args) -> tuple[Any, Optional[list[str]]]:
-    return _require_job(_client(), args.job_id), None
+    d = _require_job(_client(), args.job_id)
+    if getattr(args, "brief", False):
+        # quick status without the ~25-key dump (node_infos/timeline/envs/…)
+        return {k: d.get(k) for k in _DETAIL_BRIEF_KEYS}, None
+    return d, None
 
 
 def cmd_instances(args) -> tuple[Any, Optional[list[str]]]:
@@ -507,6 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"qzcli {__version__}")
     p.add_argument("--table", action="store_true", help="人类可读表格输出（默认 JSON）")
+    p.add_argument("--fields", help="只保留这些字段（逗号分隔），裁剪 list 结果省 token，如 --fields room,gpu_free,effective_free")
     sub = p.add_subparsers(dest="command", required=True, parser_class=JsonArgumentParser)
 
     sp = sub.add_parser("login", help="CAS 登录，保存 cookie 到 ~/.qzcli/")
@@ -532,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("-w", "--workspace", required=True)
     o.add_argument("--source", default="ALL",
                    help="ALL（默认）/ SOURCE_OFFICIAL / SOURCE_PUBLIC / SOURCE_PRIVATE")
+    o.add_argument("--name", help="按镜像 name/address 子串过滤（省得拉全表）")
     o.add_argument("--verbose", action="store_true",
                    help="包含完整 creator 等元数据（默认精简，只留 address 等关键字段）")
     o.set_defaults(func=cmd_options)
@@ -678,8 +694,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=None, help="只看最近 N 类事件")
     sp.set_defaults(func=cmd_events)
 
-    sp = sub.add_parser("detail", help="任务详情")
+    sp = sub.add_parser("detail", help="任务详情（--brief 只看状态等关键字段，省 token）")
     sp.add_argument("job_id")
+    sp.add_argument("--brief", action="store_true",
+                    help="只返回 status/name/project_name/gpu_count 等关键字段")
     sp.set_defaults(func=cmd_detail)
 
     sp = sub.add_parser("instances", help="任务的实例/Pod 列表（真实 pod 名）")
@@ -708,7 +726,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         return output.emit_error(e, table=table)
     except KeyboardInterrupt:
         return output.emit_error(QzError("已中断", code="interrupted"), table=table)
+    if getattr(args, "fields", None):
+        data = _project_fields(data, args.fields)
     return output.emit_success(data, table=table, columns=columns)
+
+
+def _project_fields(data: Any, fields_str: str) -> Any:
+    """Keep only `fields_str` (comma-separated) on list-of-dict results.
+
+    Applies to a top-level list, or to any list-of-dicts value inside a top-level
+    dict (so it works for both `specs`/`images` (list) and `ls`/`rooms`
+    ({...: [rows]})). Non-dict rows and scalar top-level keys pass through.
+    """
+    keys = [f.strip() for f in fields_str.split(",") if f.strip()]
+    if not keys:
+        return data
+
+    def row(r):
+        return {k: r.get(k) for k in keys} if isinstance(r, dict) else r
+
+    if isinstance(data, list):
+        return [row(r) for r in data]
+    if isinstance(data, dict):
+        return {k: ([row(r) for r in v]
+                    if isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+                    else v)
+                for k, v in data.items()}
+    return data
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ Output is a JSON envelope on stdout:
 - failure → `{"ok": false, "error": {"code", "message", "hint"?, "candidates"?}}`, exit 1
 
 `--table` (before the subcommand) gives a human table over the same data.
+`--fields a,b,c` (before the subcommand) trims list results to those keys — applies
+to top-level lists and to the list inside a dict result (e.g. `--fields room,gpu_free,effective_free rooms -w …`,
+`--fields job_id,name,status ls -w …`). Use it to cut tokens when you only need a few columns.
 
 ## Workflow — submit a job
 
@@ -63,8 +66,9 @@ in via browser and pass the exported cookie with `--cookie`.
 The predefined card-count quotas (1/2/4/8…). `gpu_count` is **cards per node**;
 `gpu_type` (e.g. `NVIDIA_H100_SXM_80G`) is what `create` needs. Pick a `quota_id`.
 
-### `options images -w <ws> [--source ALL|SOURCE_OFFICIAL|SOURCE_PUBLIC|SOURCE_PRIVATE] [--verbose]`
+### `options images -w <ws> [--source ALL|...] [--name SUBSTR] [--verbose]`
 → `data: [ {address, name, image_id, source, visibility} ]`
+`--name SUBSTR` filters by name/address substring (cheaper than pulling all ~50).
 Use `address` as `--image`. **A notebook-saved personal image surfaces as
 `source=SOURCE_PUBLIC` + `visibility=VISIBILITY_PRIVATE` (NOT SOURCE_PRIVATE)** —
 so to find an image you just saved, use `--source ALL`, not `--source SOURCE_PRIVATE`.
@@ -153,8 +157,13 @@ Newest-first; identical repeated events collapse to one row with a `count` (k8s
 emits the same scheduling/restart event many times). `--tail N` keeps the N most
 recent. Startup `Unschedulable` warnings are normal transient noise.
 
-### `detail JOB_ID`
-→ `data: {...}` (full job detail)
+### `detail JOB_ID [--brief]`
+→ `data: {...}` (full job detail — a large object: status, project_name,
+framework, gpu_count, instances, node_infos, framework_config, timeline, envs, …
+— the exact key set is richer than a fixed schema). `--brief` returns just
+`{job_id, name, status, project_name, framework, gpu_count, logic_compute_group_name,
+task_priority, created_at, finished_at}` — the quick way to check one job's status
+without scanning `ls` or dumping the full object.
 
 ## Interactive modeling — `nb ...` (notebook)
 
