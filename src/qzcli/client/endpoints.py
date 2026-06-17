@@ -461,18 +461,24 @@ def delete_notebook(client: Client, notebook_id: str) -> dict[str, Any]:
 
 
 def save_notebook_image(
-    client: Client, notebook_id: str, name: str, version: str, *, accessible: int = 1
+    client: Client, notebook_id: str, name: str, version: str,
+    *, accessible: int = 1, description: str = "",
 ) -> dict[str, Any]:
     """Save a running notebook as a personal image (``SaveNotebookImage``).
 
     Body uses camelCase ``notebookId``. ``accessible=1`` = private personal image
-    (the common case). The notebook must be RUNNING.
+    (the common case). The notebook must be RUNNING. ``description`` lands on
+    the saved image's ``description`` field (visible via ``options images``);
+    use it to record "what's in this image" so a later run can decide whether
+    to re-save.
     """
-    return _v2_result(
-        client, "notebook", "SaveNotebookImage",
-        {"notebookId": notebook_id, "name": name, "version": version,
-         "accessible": accessible},
-    )
+    body: dict[str, Any] = {
+        "notebookId": notebook_id, "name": name, "version": version,
+        "accessible": accessible,
+    }
+    if description:
+        body["description"] = description
+    return _v2_result(client, "notebook", "SaveNotebookImage", body)
 
 
 def estimate_save_size(client: Client, notebook_id: str) -> dict[str, Any]:

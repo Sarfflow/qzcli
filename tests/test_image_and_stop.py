@@ -25,3 +25,30 @@ def test_nb_stop_no_wait_skips_polling():
     out = notebook.stop(c, "nb-1", wait=False)
     assert "wait" not in out
     assert all(not k.startswith("v2:GetNotebook") for k, _ in c.calls)
+
+
+def test_save_notebook_image_passes_description_when_set():
+    c = FakeClient({"v2:SaveNotebookImage": {}})
+    endpoints.save_notebook_image(c, "nb-1", "qzcli-foo", "20260617-1200",
+                                  description="apt: htop; pip: einops")
+    # the SaveNotebookImage body should include description verbatim
+    bodies = [body for key, body in c.calls if key == "v2:SaveNotebookImage"]
+    assert bodies and bodies[0].get("description") == "apt: htop; pip: einops"
+    assert bodies[0]["notebookId"] == "nb-1"  # camelCase preserved
+
+
+def test_save_notebook_image_omits_description_when_empty():
+    c = FakeClient({"v2:SaveNotebookImage": {}})
+    endpoints.save_notebook_image(c, "nb-1", "x", "1")
+    bodies = [body for key, body in c.calls if key == "v2:SaveNotebookImage"]
+    assert bodies and "description" not in bodies[0]
+
+
+def test_image_to_dict_carries_description():
+    from qzcli.domain.models import Image
+    im = Image.from_api({
+        "address": "registry/x:1", "name": "x:1", "image_id": "image-x",
+        "description": "apt: htop; pip: einops",
+    })
+    assert im.description == "apt: htop; pip: einops"
+    assert im.to_dict()["description"] == "apt: htop; pip: einops"

@@ -319,7 +319,7 @@ deps, and smoke-test before `save-image`.
   poll the log with cheap follow-up `tail` calls. For truly multi-hour training,
   use `create` (distributed) instead — it has proper logs/events/metrics.
 
-### `nb save-image NOTEBOOK_ID --name N (--version V | --auto-version)`
+### `nb save-image NOTEBOOK_ID --name N (--version V | --auto-version) [--description TEXT]`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks
 until the build reaches SUCCESS by default (`--no-wait` to return at submit). On
 success the result includes `image_address` (+ `image_id`) — feed it straight to
@@ -335,6 +335,12 @@ Can't stop the notebook while a save is BUILDING.
   human-named `<semantic>:<v1|v2|...>` ones. Manual `--version V` still works
   for one-off names. The `qzcli-` prefix is the convention regardless of which
   agent drives (CC, Codex, etc.).
+- **`--description "..."`** (alias `--desc`): writes a remark on the saved image
+  (visible via `options images` in the `description` field). Best practice:
+  record **what's in the image** (key packages, what it's for, project hint),
+  so a later run can `options images --name qzcli-<base>` + read `description`
+  and decide whether the existing image already covers the new task — avoiding
+  unnecessary re-saves.
 
 ### `nb stop NOTEBOOK_ID`
 → `data: {stopped, result, wait}`. Blocks until STOPPED by default.

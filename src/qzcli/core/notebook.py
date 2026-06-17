@@ -388,10 +388,12 @@ def stop(client: Client, notebook_id: str, *, wait: bool = True,
 
 
 def save_image(client: Client, notebook_id: str, name: str, version: str,
-               *, accessible: int = 1, wait: bool = True,
+               *, accessible: int = 1, description: str = "",
+               wait: bool = True,
                timeout_s: int = waitlib.DEFAULT_TIMEOUT_S) -> dict[str, Any]:
     """Save a RUNNING notebook as a personal image; by default block until the
-    image build reaches SUCCESS."""
+    image build reaches SUCCESS. ``description`` lands on the image's
+    ``description`` field — visible via ``options images``."""
     nb = endpoints.get_notebook(client, notebook_id)
     if nb.get("status") != "RUNNING":
         raise QzError(
@@ -399,9 +401,13 @@ def save_image(client: Client, notebook_id: str, name: str, version: str,
             code="invalid_notebook_state",
             hint="先启动 notebook（保存的是运行容器的当前状态）",
         )
-    res = endpoints.save_notebook_image(client, notebook_id, name, version, accessible=accessible)
+    res = endpoints.save_notebook_image(
+        client, notebook_id, name, version,
+        accessible=accessible, description=description,
+    )
     out = {"notebook_id": notebook_id, "image_name": name, "version": version,
-           "accessible": accessible, "image_address": "", "result": res}
+           "accessible": accessible, "description": description,
+           "image_address": "", "result": res}
     if wait:
         w = waitlib.wait_until(
             lambda: _save_status(client, notebook_id),

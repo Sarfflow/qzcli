@@ -304,6 +304,7 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
             version = args.version
         return notebook_core.save_image(
             client, args.notebook_id, args.name, version,
+            description=args.description or "",
             wait=args.wait, timeout_s=args.timeout,
         ), None  # accessible=1 (private personal image — the confirmed common case)
     if args.nb_target == "rm-image":
@@ -676,7 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
     g = n.add_mutually_exclusive_group(required=True)
     g.add_argument("--version", help="镜像版本 tag")
     g.add_argument("--auto-version", dest="auto_version", action="store_true",
-                   help="用当前 UTC 时间戳作 version（YYYYMMDD-HHMMSS）—— CC 保存的推荐用法")
+                   help="用当前 UTC 时间戳作 version（YYYYMMDD-HHMMSS）—— agent 保存推荐")
+    n.add_argument("--description", "--desc", dest="description", default="",
+                   help="镜像备注；建议写「装了什么 + 项目背景」便于后续判断是否需重存")
     _add_wait_flags(n)  # default: block until image build SUCCESS
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser("rm-image", help="删除个人镜像（image-<id>，或 -w + 名称/address）")
