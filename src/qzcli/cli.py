@@ -307,6 +307,30 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
             description=args.description or "",
             wait=args.wait, timeout_s=args.timeout,
         ), None  # accessible=1 (private personal image — the confirmed common case)
+    if args.nb_target == "describe-image":
+        ref = args.image
+        if not args.workspace:
+            raise QzError(
+                "需要 -w <ws> 用来定位镜像（read-modify-write 要先读到当前 visibility/brand）",
+                code="usage_error",
+                hint="例: qzcli nb describe-image <image-id> -w <ws> --description '...'",
+            )
+        ws_id, _ = _resolved_ws(client, args.workspace)
+        if ref.startswith("image-"):
+            image_id = ref
+        else:
+            imgs = endpoints.list_images(client, ws_id, source="ALL")
+            match = [im for im in imgs if ref in (im.address, im.name)]
+            if len(match) != 1:
+                raise QzError(
+                    f"镜像 '{ref}' 未在该空间唯一匹配（{len(match)} 个）",
+                    code="invalid_image",
+                    hint="直接传 image-<id>，或用 qzcli options images 查 address",
+                    candidates=[{"name": im.name, "address": im.address,
+                                 "image_id": im.image_id} for im in imgs][:20],
+                )
+            image_id = match[0].image_id
+        return endpoints.set_image_description(client, ws_id, image_id, args.description), None
     if args.nb_target == "rm-image":
         ref = args.image
         if ref.startswith("image-"):
@@ -681,6 +705,13 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--description", "--desc", dest="description", default="",
                    help="镜像备注；建议写「装了什么 + 项目背景」便于后续判断是否需重存")
     _add_wait_flags(n)  # default: block until image build SUCCESS
+    n.set_defaults(func=cmd_nb)
+    n = nsub.add_parser("describe-image", help="修改个人镜像的备注（read-modify-write，保留其它字段）")
+    n.add_argument("image", help="image_id（image-…）或镜像 name/address")
+    n.add_argument("-w", "--workspace", required=True,
+                   help="按 name/address 解析时需要；同时也用来 read 当前字段")
+    n.add_argument("--description", required=True,
+                   help="新备注（替换旧的；传空串 \"\" 清空）")
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser("rm-image", help="删除个人镜像（image-<id>，或 -w + 名称/address）")
     n.add_argument("image", help="image_id（image-…）或镜像 name/address（需配 -w）")

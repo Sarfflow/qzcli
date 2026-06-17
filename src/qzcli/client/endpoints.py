@@ -377,6 +377,68 @@ def delete_image(client: Client, image_id: str) -> Any:
     return client.delete_api(f"image/{image_id}")
 
 
+def update_image(
+    client: Client, image_id: str, *,
+    description: Optional[str] = None,
+    visibility: Optional[str] = None,
+    support_brand_list: Optional[list[str]] = None,
+) -> Any:
+    """``POST /api/v1/image/update``. The endpoint expects the *full* set of
+    mutable fields (id + visibility + support_brand_list + description) — it
+    is NOT a JSON-Patch. Callers wanting a single-field edit should read the
+    image first and re-send the unchanged fields to avoid clobbering them
+    (see :func:`set_image_description`)."""
+    body: dict[str, Any] = {"id": image_id}
+    if description is not None:
+        body["description"] = description
+    if visibility is not None:
+        body["visibility"] = visibility
+    if support_brand_list is not None:
+        body["support_brand_list"] = support_brand_list
+    return client.post_api("image/update", body)
+
+
+def find_image_by_id(
+    client: Client, workspace_id: str, image_id: str
+) -> Optional[Image]:
+    """Locate an image by id across all sources in this workspace."""
+    for src in ("SOURCE_PRIVATE", "SOURCE_PUBLIC", "SOURCE_OFFICIAL"):
+        try:
+            for im in list_images(client, workspace_id, source=src):
+                if im.image_id == image_id:
+                    return im
+        except QzError:
+            continue
+    return None
+
+
+def set_image_description(
+    client: Client, workspace_id: str, image_id: str, description: str,
+) -> dict[str, Any]:
+    """Read-modify-write for the description field: re-sends the image's current
+    visibility + support_brand_list to ``image/update`` so they aren't cleared."""
+    im = find_image_by_id(client, workspace_id, image_id)
+    if im is None:
+        raise QzError(
+            f"镜像 {image_id} 在工作空间 {workspace_id} 中未找到",
+            code="invalid_image",
+            hint="用 qzcli options images -w <ws> --source ALL 列出可见镜像",
+        )
+    visibility = im.visibility or "VISIBILITY_PRIVATE"
+    brands = [b.get("brand", "") for b in (im.raw.get("support_brand_info_list") or [])]
+    if not brands:
+        brands = [""]
+    res = update_image(
+        client, image_id,
+        description=description, visibility=visibility, support_brand_list=brands,
+    )
+    return {
+        "image_id": image_id, "name": im.name, "address": im.address,
+        "old_description": im.description, "new_description": description,
+        "result": res,
+    }
+
+
 def find_saved_image(
     client: Client, workspace_id: str, name: str, version: str
 ) -> Optional[Image]:

@@ -52,3 +52,52 @@ def test_image_to_dict_carries_description():
     })
     assert im.description == "apt: htop; pip: einops"
     assert im.to_dict()["description"] == "apt: htop; pip: einops"
+
+
+def test_set_image_description_preserves_visibility_and_brand():
+    # Stage existing image in list_images so find_image_by_id locates it.
+    c = FakeClient({
+        "image/list": {"images": [{
+            "image_id": "image-abc", "name": "qzcli-foo:20260617-1000",
+            "address": "registry/qzcli-foo:20260617-1000",
+            "description": "old", "visibility": "VISIBILITY_PRIVATE",
+            "support_brand_info_list": [{"brand": "BRAND_X", "brand_name": "X"}],
+            "source": "SOURCE_PUBLIC",
+        }]},
+        "image/update": {"code": 0},
+    })
+    out = endpoints.set_image_description(c, "ws-1", "image-abc", "fresh notes")
+    assert out["old_description"] == "old"
+    assert out["new_description"] == "fresh notes"
+    # the update body must include all the read-back fields, not just description
+    update_bodies = [b for k, b in c.calls if k == "image/update"]
+    assert update_bodies, "no update call recorded"
+    body = update_bodies[0]
+    assert body["id"] == "image-abc"
+    assert body["description"] == "fresh notes"
+    assert body["visibility"] == "VISIBILITY_PRIVATE"
+    assert body["support_brand_list"] == ["BRAND_X"]  # round-tripped from support_brand_info_list
+
+
+def test_set_image_description_falls_back_when_no_brand():
+    c = FakeClient({
+        "image/list": {"images": [{
+            "image_id": "image-abc", "name": "x:1", "address": "r/x:1",
+            "description": "", "visibility": "VISIBILITY_PRIVATE",
+            "source": "SOURCE_PUBLIC",
+        }]},
+        "image/update": {"code": 0},
+    })
+    endpoints.set_image_description(c, "ws-1", "image-abc", "hi")
+    body = [b for k, b in c.calls if k == "image/update"][0]
+    assert body["support_brand_list"] == [""]
+
+
+def test_set_image_description_unknown_id_raises():
+    c = FakeClient({"image/list": {"images": []}})
+    try:
+        endpoints.set_image_description(c, "ws-1", "image-nope", "x")
+    except Exception as e:
+        assert getattr(e, "code", "") == "invalid_image"
+    else:
+        raise AssertionError("expected QzError invalid_image")

@@ -340,7 +340,8 @@ Can't stop the notebook while a save is BUILDING.
   record **what's in the image** (key packages, what it's for, project hint),
   so a later run can `options images --name qzcli-<base>` + read `description`
   and decide whether the existing image already covers the new task — avoiding
-  unnecessary re-saves.
+  unnecessary re-saves. To edit an existing image's description without
+  re-saving, use `nb describe-image`.
 
 ### `nb stop NOTEBOOK_ID`
 → `data: {stopped, result, wait}`. Blocks until STOPPED by default.
@@ -348,6 +349,14 @@ Can't stop the notebook while a save is BUILDING.
 ### `nb rm NOTEBOOK_ID [--stop]`
 Delete a notebook — the platform requires it be STOPPED/FAILED first. `--stop`
 stops it and waits for STOPPED, then deletes.
+
+### `nb describe-image <image-id|name|address> -w <ws> --description "..."`
+Edit an existing image's description **without re-saving**. Read-modify-write:
+reads the image's current `visibility` + `support_brand_list` and re-sends them
+along with the new `description` so other fields aren't clobbered. Returns
+`{image_id, name, address, old_description, new_description, result}`. Pass
+`--description ""` to clear. Useful when you realise a saved image needs richer
+hints, or for migrating un-described legacy images.
 
 ### `nb rm-image image-<id>`  (or `<name>/<address> -w <ws>`)
 Delete a personal image. Pass the `image_id` (`image-…`, from `options images`)
