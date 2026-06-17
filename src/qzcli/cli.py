@@ -297,8 +297,13 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
             client, args.notebook_id, stop_first=args.stop, timeout_s=args.timeout)
         return {"deleted": args.notebook_id, **res}, None
     if args.nb_target == "save-image":
+        if args.auto_version:
+            from datetime import datetime, timezone
+            version = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        else:
+            version = args.version
         return notebook_core.save_image(
-            client, args.notebook_id, args.name, args.version,
+            client, args.notebook_id, args.name, version,
             wait=args.wait, timeout_s=args.timeout,
         ), None  # accessible=1 (private personal image — the confirmed common case)
     if args.nb_target == "rm-image":
@@ -666,8 +671,12 @@ def build_parser() -> argparse.ArgumentParser:
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser("save-image", help="把运行中的 notebook 存为个人镜像（私有；默认阻塞至 SUCCESS）")
     n.add_argument("notebook_id")
-    n.add_argument("--name", required=True, help="镜像名")
-    n.add_argument("--version", required=True, help="镜像版本 tag")
+    n.add_argument("--name", required=True,
+                   help="镜像名；CC 保存请用 cc-<base> 前缀以与人工命名区分")
+    g = n.add_mutually_exclusive_group(required=True)
+    g.add_argument("--version", help="镜像版本 tag")
+    g.add_argument("--auto-version", dest="auto_version", action="store_true",
+                   help="用当前 UTC 时间戳作 version（YYYYMMDD-HHMMSS）—— CC 保存的推荐用法")
     _add_wait_flags(n)  # default: block until image build SUCCESS
     n.set_defaults(func=cmd_nb)
     n = nsub.add_parser("rm-image", help="删除个人镜像（image-<id>，或 -w + 名称/address）")

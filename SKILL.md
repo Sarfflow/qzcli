@@ -215,10 +215,31 @@ rarely needed.
 
 **用卡文明 (release GPU promptly):** a notebook holds its GPU the whole time. The
 workflow is only *done* once the distributed job is **stably running** — at that
-point `nb stop` the notebook to free the GPU. (A CPU-side agent then monitors the
-job, e.g. polls every ~45 min, and re-runs this workflow on anomaly.)
+point `nb stop` the notebook to free the GPU. (A monitoring agent then polls the
+job, e.g. every ~45 min, and re-runs this workflow on anomaly.)
 
-Flow: `nb rooms` → `nb specs` → `nb start` (on 可上网 GPU) → `nb exec` (configure env / smoke-test) → `nb save-image` → `create` distributed → **once it runs stably** → `nb stop`.
+**The workflow is flexible — pick the shape that fits where the agent runs:**
+
+- **Pattern A — CPU-side agent driving a separate 4090 dev box.** Agent runs on
+  a CPU instance (or laptop); spins a 4090 notebook just for env setup +
+  smoke-test; `nb save-image` it; submits distributed; `nb stop`s the 4090. Use
+  when the agent itself doesn't need GPU.
+- **Pattern B — agent IS on the 4090 dev box.** Agent runs inside the 4090
+  notebook (uses `qzcli whoami` to know which notebook it is); develops/iterates
+  there directly; when ready, `nb save-image` its own pod, submits distributed
+  using that image, then `nb stop`s itself. Use when the agent wants `nvidia-smi`
+  / GPU access during iteration.
+
+In both: `nb save-image` is **conditional**, not mandatory — only call it when
+the env actually changed (new apt/pip packages, new files in the image layer).
+If you only edited GPFS-resident code, the existing image is still good (code
+is mounted, not baked in).
+
+**Naming convention for agent-saved images:** to distinguish CC-saved snapshots
+from user-named ones, use `--name cc-<base>` (e.g. `cc-posewm`, `cc-mywork`)
+with `--auto-version` (which writes a `YYYYMMDD-HHMMSS` UTC timestamp into
+version). Human-named images are usually `<semantic>:<v1|v2|...>`; the
+`cc-…:<timestamp>` shape is the agent-saved bucket.
 
 ### `nb ls -w <ws>`
 → `data: [ {name, status, room, gpu_count, gpu_ram, image, backup_image, notebook_id, ...} ]`
@@ -297,13 +318,21 @@ deps, and smoke-test before `save-image`.
   poll the log with cheap follow-up `tail` calls. For truly multi-hour training,
   use `create` (distributed) instead — it has proper logs/events/metrics.
 
-### `nb save-image NOTEBOOK_ID --name N --version V`
+### `nb save-image NOTEBOOK_ID --name N (--version V | --auto-version)`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks
 until the build reaches SUCCESS by default (`--no-wait` to return at submit). On
 success the result includes `image_address` (+ `image_id`) — feed it straight to
 `create --image` (no need to go hunt it in `options images`). The image lists under
 `options images --source ALL` (as `source=SOURCE_PUBLIC`, `visibility=PRIVATE`).
 Can't stop the notebook while a save is BUILDING.
+- **When to call:** only when the env actually changed (apt/pip/config). If
+  you only edited code on GPFS, the existing image is fine — code is mounted,
+  not baked in.
+- **Naming (CC convention):** use `--name cc-<base>` + `--auto-version`
+  (`--auto-version` writes UTC `YYYYMMDD-HHMMSS` into version), so agent-saved
+  images form a distinct `cc-<base>:<timestamp>` namespace separate from
+  human-named `<semantic>:<v1|v2|...>` ones. Manual `--version V` still works
+  for one-off names.
 
 ### `nb stop NOTEBOOK_ID`
 → `data: {stopped, result, wait}`. Blocks until STOPPED by default.
