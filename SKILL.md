@@ -81,9 +81,11 @@ by default). A bad `--source` errors with `invalid_argument` + candidates.
 
 ### `rooms -w <ws> [--low-priority-threshold N] [--fit IxC]`
 Per-机房 (lcg) GPU rollup, emptiest first — the unit you pick a job's target from.
-→ `data: {low_priority_threshold, n_rooms, rooms: [{room, lcg_id, gpu_type, cluster, n_nodes, n_nodes_ready, gpu_total, gpu_free, gpu_used, low_priority_preemptible, effective_free, max_free_on_single_node, nodes_full_free}]}`
+→ `data: {low_priority_threshold, n_rooms, rooms: [{room, lcg_id, gpu_type, cluster, n_nodes, n_nodes_ready, gpu_total, gpu_free, gpu_used, low_priority_preemptible, effective_free, max_free_on_single_node, nodes_full_free, cpu_total, cpu_free, cpu_used}]}`
 Sorted by `gpu_free`, then `effective_free` (= `gpu_free + low_priority_preemptible`),
-then `gpu_total`. Low-priority cards (`priority <= N`, default 3) count as free
+then `gpu_total`. **CPU-only workspaces** (every room has `gpu_total=0`) are sorted
+by `cpu_free` instead — `gpu_free` is uniformly 0 there and useless for picking a
+CPU room. Low-priority cards (`priority <= N`, default 3) count as free
 because a higher-priority job evicts them. 机房 share nodes, so `gpu_free` can be
 negative (oversubscribed) — use `effective_free` there.
 **Aggregates don't imply placeability**: free cards may be fragmented 1-2/node, so
@@ -253,9 +255,16 @@ deps, and smoke-test before `save-image`.
 - On official images pip may refuse with PEP 668 — use `pip install --break-system-packages`.
 - Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
   `exit`; for env changes to persist into an image, `save-image` after. For
-  truly long-running commands (hours), detach to a GPFS logfile and poll it
-  with cheap follow-up `nb exec -- tail` calls — `--stream` is not for hour-long
-  jobs (the timeout would kill it).
+  **commands that might exceed `--timeout`** (long inference, big data downloads,
+  hour-scale jobs), don't `--stream` them — the timeout WILL kill the terminal
+  and the command with it. Detach to a GPFS logfile instead:
+  ```
+  nb exec <id> -- 'setsid bash -c "python video_infer.py > ~/run.log 2>&1" & echo pid=$!'
+  nb exec <id> -- 'tail -n 50 ~/run.log; kill -0 <pid> && echo RUNNING || echo DONE'
+  ```
+  `setsid`/`nohup &` detaches from the PTY so terminal teardown doesn't kill it;
+  poll the log with cheap follow-up `tail` calls. For truly multi-hour training,
+  use `create` (distributed) instead — it has proper logs/events/metrics.
 
 ### `nb save-image NOTEBOOK_ID --name N --version V`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks

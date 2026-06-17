@@ -223,6 +223,7 @@ def rooms_availability(
             client, workspace_id, logic_compute_group_id=g.id,
         )
         gpu_total = gpu_free = gpu_used = preempt = 0.0
+        cpu_total = cpu_free = cpu_used = 0.0
         ready = 0
         max_free = 0
         nodes_full_free = 0
@@ -231,11 +232,15 @@ def rooms_availability(
         clusters: set[str] = set()
         for n in nodes_raw:
             gpu = n.get("gpu") or {}
+            cpu = n.get("cpu") or {}
             n_total = _num(gpu, "total")
             n_free = _num(gpu, "available")
             gpu_total += n_total
             gpu_free += n_free
             gpu_used += _num(gpu, "used")
+            cpu_total += _num(cpu, "total")
+            cpu_free += _num(cpu, "available")
+            cpu_used += _num(cpu, "used")
             n_pre = preemptible_by_node.get(n.get("name", ""), 0)
             preempt += n_pre
             is_ready = n.get("status") == "Ready"
@@ -268,6 +273,9 @@ def rooms_availability(
             "effective_free": round(gpu_free + preempt, 1),
             "max_free_on_single_node": max_free,
             "nodes_full_free": nodes_full_free,
+            "cpu_total": int(cpu_total),
+            "cpu_free": int(cpu_free),
+            "cpu_used": int(cpu_used),
         }
         if fit_cards:
             room["fit_nodes_idle"] = fit_idle
@@ -280,6 +288,13 @@ def rooms_availability(
         rooms.sort(
             key=lambda r: (r["fits"], r["fit_nodes_idle"], r["fit_nodes_effective"],
                            r["effective_free"]),
+            reverse=True,
+        )
+    elif rooms and all(r["gpu_total"] == 0 for r in rooms):
+        # CPU-only workspace: gpu_free is uniformly 0 (useless). Sort by cpu_free,
+        # then by fleet size — so an agent picks an actually-uncongested room.
+        rooms.sort(
+            key=lambda r: (r["cpu_free"], r["n_nodes_ready"], r["n_nodes"]),
             reverse=True,
         )
     else:
