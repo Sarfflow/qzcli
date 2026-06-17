@@ -153,14 +153,33 @@ they are NOT the bare `RUNNING`/`SUCCEEDED` forms.) `--running` filters to runni
 ### `instances JOB_ID`
 → `data: [ {name, instance_type, node, instance_status, created_at, started_at, finished_at, running_time_ms} ]`
 
-### `logs JOB_ID [--tail N]`
-→ `data: {logs: [{message, pod_name, node, time, timestamp_ms, ...}], total}`
+### `logs JOB_ID [--tail N] [--since EXPR] [-f|--follow] [--interval S] [--raw]`
+→ default: `data: {logs: [{message, pod_name, node, time, timestamp_ms, ...}], total}`
 `--tail N` (default 200) returns the most recent N lines, oldest-first (newest
 last). A bad JOB_ID → `invalid_job`; a job with no scheduled pods → `no_instances`.
 When the platform returns **0 lines**, the response adds `logs_available:false` +
 a `note`: if the job is terminal the logs are unavailable (some pods never get
 indexed) — **stop polling**; if it's still starting, retry shortly. (Don't loop
 on an empty `logs` without checking `note`.)
+
+`--since EXPR` filters to entries newer than EXPR. Accepts `5m` / `2h` / `30s` /
+`1d` (relative-from-now) or ISO-8601 (`2026-06-17T10:00:00Z` / `…+08:00`). Pairs
+nicely with `--tail` for "give me everything in the last 5 minutes." Bad EXPR →
+`usage_error`.
+
+`-f` / `--follow` switches to streaming mode: the initial `--tail`/`--since`
+backfill is **written one-line-per-entry to stderr** (format `[time pod] msg`,
+or just `msg` with `--raw`), then new entries are polled every `--interval`s
+(default 2.0; empty rounds 1.5× back off to 5s cap). Loop exits on Ctrl-C **or**
+when the job reaches `job_succeeded` / `job_failed` / `job_stopped` (checked
+every ~3 empty rounds, so the agent doesn't have to babysit). Final stdout is a
+summary envelope: `{followed: true, exit_reason: "terminal"|"interrupted",
+final_status, total_new, last_timestamp_ms}`. Combine with `run_in_background`
+for ssh-tail-style live monitoring.
+
+For agents: prefer `--since 5m` (one-shot, cheap, replayable) over `--follow`
+unless you actually want to tail live; the harness will surface the stderr
+stream notification-by-notification while you do other work.
 
 ### `metrics JOB_ID [--minutes N] [--interval S] [--metric M ...]`
 Per-instance utilization over time — check a running job is actually using GPUs.

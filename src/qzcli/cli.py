@@ -12,6 +12,7 @@ turns that into the JSON error envelope and a non-zero exit code.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -97,6 +98,33 @@ def _condense_events(events: list[dict], *, tail: Optional[int] = None) -> list[
     out = [grouped[k] for k in order]
     out.sort(key=lambda g: g.get("last_timestamp") or "", reverse=True)
     return out[:tail] if tail else out
+
+
+_SINCE_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
+
+
+def _parse_since(s: str) -> str:
+    """Parse ``5m`` / ``2h`` / ``30s`` / ``1d`` or ISO-8601 into an epoch-ms string.
+
+    The platform's ``start_timestamp_ms`` filter wants millis as a string; we
+    return the result in that exact shape so callers can pass it straight
+    through.
+    """
+    m = _SINCE_RE.fullmatch(s)
+    if m:
+        n = int(m.group(1))
+        unit_s = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+        return str(int((time.time() - n * unit_s) * 1000))
+    from datetime import datetime
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise QzError(
+            f"无法解析 --since 值 {s!r}",
+            code="usage_error",
+            hint="支持 5m/2h/30s/1d 或 ISO-8601（如 2026-06-17T10:00:00Z）",
+        ) from e
+    return str(int(dt.timestamp() * 1000))
 
 
 # --- command handlers (return data, optional table columns) ---------------
@@ -437,11 +465,28 @@ def cmd_ls(args) -> tuple[Any, Optional[list[str]]]:
     return {"total": data.get("total", len(rows)), "jobs": rows}, None
 
 
+_LOG_TERMINAL_STATUSES = frozenset({"job_succeeded", "job_failed", "job_stopped"})
+
+
 def cmd_logs(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
-    _require_job(client, args.job_id)
-    # --tail = the most recent N: fetch newest-first, then restore chrono order.
-    result = endpoints.job_logs(client, args.job_id, page_size=args.tail, sort="descend")
+    detail = _require_job(client, args.job_id)
+    since_ms = _parse_since(args.since) if args.since else None
+    follow = bool(getattr(args, "follow", False))
+
+    # Initial fetch: with --since, time-window ascending; otherwise the existing
+    # "tail-most-recent" descend-then-reverse trick.
+    if since_ms is not None:
+        result = endpoints.job_logs(
+            client, args.job_id, page_size=max(args.tail, 500),
+            start_timestamp_ms=since_ms, sort="ascend",
+        )
+    else:
+        result = endpoints.job_logs(client, args.job_id, page_size=args.tail, sort="descend")
+        raw = result.get("logs") if isinstance(result, dict) else None
+        if isinstance(raw, list) and raw:
+            result["logs"] = list(reversed(raw))
+
     meta = result.get("ResponseMetadata") if isinstance(result, dict) else None
     if isinstance(meta, dict) and meta.get("Error"):
         raise QzError(
@@ -449,27 +494,129 @@ def cmd_logs(args) -> tuple[Any, Optional[list[str]]]:
             code="no_instances",
             hint="用 qzcli instances <job_id> 查看实例状态",
         )
-    logs = result.get("logs") if isinstance(result, dict) else None
-    if isinstance(logs, list) and logs:
-        result["logs"] = list(reversed(logs))
+
+    logs: list[dict] = []
+    raw_logs = result.get("logs") if isinstance(result, dict) else None
+    if isinstance(raw_logs, list):
+        logs = [e for e in raw_logs if isinstance(e, dict)]
+
+    if not follow:
+        if logs:
+            result["logs"] = logs
+            return result, None
+        # 0-log path — disambiguate "not indexed yet" from "terminal and lost".
+        status = (detail or {}).get("status", "")
+        terminal = status in _LOG_TERMINAL_STATUSES
+        if isinstance(result, dict):
+            result["logs"] = []
+            result["logs_available"] = False
+            result["note"] = (
+                f"0 条日志；job 状态 {status or '未知'}（终态）——平台未对该 job 的 pod 返回任何"
+                "日志行。对终态 job 这通常表示日志不可取（并非确认无输出），不必继续轮询。"
+                if terminal else
+                f"0 条日志；job 状态 {status or '未知'}——日志可能尚未索引，稍后用同样命令重试。"
+            )
         return result, None
-    # No log lines: disambiguate "not indexed yet" from "genuinely no output / not
-    # retrievable" using the job's phase, so the caller stops polling when futile.
-    if isinstance(result, dict):
+
+    # --- --follow path -----------------------------------------------------
+    # Stream entries to stderr as they arrive; at end, return a one-shot
+    # summary on stdout (the JSON envelope). This mirrors `nb exec --stream`.
+    seen: set[str] = set()
+    last_ms: int = 0
+
+    def _emit(e: dict) -> None:
+        if args.raw:
+            print(e.get("message", ""), file=sys.stderr, flush=True)
+        else:
+            print(
+                f"[{e.get('time', '')} {e.get('pod_name', '')}] {e.get('message', '')}",
+                file=sys.stderr, flush=True,
+            )
+
+    for e in logs:
+        lid = e.get("log_id")
+        if lid:
+            seen.add(lid)
         try:
-            status = (endpoints.job_detail(client, args.job_id) or {}).get("status", "")
-        except QzError:
-            status = ""
-        terminal = status in ("job_succeeded", "job_failed", "job_stopped")
-        result["logs"] = []
-        result["logs_available"] = False
-        result["note"] = (
-            f"0 条日志；job 状态 {status or '未知'}（终态）——平台未对该 job 的 pod 返回任何"
-            "日志行。对终态 job 这通常表示日志不可取（并非确认无输出），不必继续轮询。"
-            if terminal else
-            f"0 条日志；job 状态 {status or '未知'}——日志可能尚未索引，稍后用同样命令重试。"
-        )
-    return result, None
+            last_ms = max(last_ms, int(e.get("timestamp_ms") or 0))
+        except (TypeError, ValueError):
+            pass
+        _emit(e)
+
+    # If we got nothing on the initial fetch, peg the cursor at "now" so the
+    # first poll doesn't redownload everything from the dawn of the pod.
+    if not last_ms:
+        last_ms = int(time.time() * 1000) - 1
+
+    base_interval = max(args.interval, 0.5)
+    cur_interval = base_interval
+    total_new = len(logs)
+    empty_rounds = 0
+    exit_reason = "interrupted"
+    final_status = (detail or {}).get("status", "")
+
+    try:
+        while True:
+            time.sleep(cur_interval)
+            try:
+                batch = endpoints.job_logs(
+                    client, args.job_id, page_size=500,
+                    start_timestamp_ms=str(last_ms + 1), sort="ascend",
+                )
+            except QzError:
+                # Transient (network/network-gateway); back off and try again.
+                cur_interval = min(cur_interval * 1.5, 5.0)
+                empty_rounds += 1
+                continue
+
+            fresh = 0
+            batch_logs = batch.get("logs") if isinstance(batch, dict) else None
+            if isinstance(batch_logs, list):
+                for e in batch_logs:
+                    if not isinstance(e, dict):
+                        continue
+                    lid = e.get("log_id")
+                    if lid and lid in seen:
+                        continue
+                    if lid:
+                        seen.add(lid)
+                    try:
+                        last_ms = max(last_ms, int(e.get("timestamp_ms") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    _emit(e)
+                    fresh += 1
+
+            if fresh:
+                total_new += fresh
+                cur_interval = base_interval
+                empty_rounds = 0
+                continue
+
+            cur_interval = min(cur_interval * 1.5, 5.0)
+            empty_rounds += 1
+            # Every ~3 empty rounds, check if the job is terminal — once it is,
+            # no more logs will arrive, so don't make the user Ctrl-C.
+            if empty_rounds >= 3:
+                empty_rounds = 0
+                try:
+                    d = endpoints.job_detail(client, args.job_id)
+                    final_status = (d or {}).get("status", final_status)
+                except QzError:
+                    pass
+                if final_status in _LOG_TERMINAL_STATUSES:
+                    exit_reason = "terminal"
+                    break
+    except KeyboardInterrupt:
+        exit_reason = "interrupted"
+
+    return {
+        "followed": True,
+        "exit_reason": exit_reason,
+        "final_status": final_status,
+        "total_new": total_new,
+        "last_timestamp_ms": last_ms,
+    }, None
 
 
 def cmd_stop(args) -> tuple[Any, Optional[list[str]]]:
@@ -766,9 +913,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=100)
     sp.set_defaults(func=cmd_ls)
 
-    sp = sub.add_parser("logs", help="任务日志")
+    sp = sub.add_parser(
+        "logs",
+        help="任务日志（默认一次性；--follow 持续轮询，新条目逐行写到 stderr，最后 stdout 输出摘要 envelope）",
+    )
     sp.add_argument("job_id")
-    sp.add_argument("--tail", type=int, default=200, help="取最近 N 条（最新在后）")
+    sp.add_argument("--tail", type=int, default=200, help="初始 backfill：取最近 N 条（最新在后）")
+    sp.add_argument("--since", help="只取此时间点之后的日志：5m / 2h / 30s / 1d，或 ISO-8601")
+    sp.add_argument("-f", "--follow", action="store_true",
+                    help="持续轮询新日志，直到 Ctrl-C 或 job 进入终态（succeeded/failed/stopped）")
+    sp.add_argument("--interval", type=float, default=2.0,
+                    help="--follow 基础轮询间隔秒（默认 2.0；空轮 1.5x 退避至 5s 封顶）")
+    sp.add_argument("--raw", action="store_true",
+                    help="--follow 时只把 message 一行行打到 stderr（便于 grep）")
     sp.set_defaults(func=cmd_logs)
 
     sp = sub.add_parser("stop", help="停止任务（默认阻塞至终态）")
