@@ -234,13 +234,28 @@ deps, and smoke-test before `save-image`.
   statement's `$?`; `stdout` is the merged stdout+stderr (it's a PTY), cleaned of
   ANSI/banner/prompt. `--raw` returns the unprocessed terminal text.
 - `--timeout S` (default 120) is the overall wall-clock budget; on overrun
-  `timed_out:true`, `exit_code:null`. **Put `--timeout`/`--raw` before the id**
-  (`nb exec --timeout 600 <id> -- ...`), like `kubectl exec`; the command goes
-  after `--`.
+  `timed_out:true`, `exit_code:null`, and stdout contains whatever streamed in
+  before the cut. The command runs in a PTY — **the underlying shell dies on
+  terminal teardown**, so don't expect partial work to persist past timeout.
+  **Put `--timeout`/`--raw`/`--stream` before the id** (`nb exec --timeout 600 <id> -- ...`),
+  like `kubectl exec`; the command goes after `--`.
+- `--stream`: write each real-stdout line to **stderr** the moment it arrives
+  (filtered of PTY echo + START/END markers); final JSON still lands on stdout.
+  Combined with `run_in_background` + a Monitor watching stdout, this gives a
+  live ssh-tail UX (one notification per line). Without `--stream`, you only
+  get the full output at the end.
+- ⚠ **Don't pipe `nb exec` through a stdin-reading JSON parser** (e.g.
+  `... 2>&1 | python3 -c "json.load(sys.stdin)"`) — the parser buffers until
+  EOF and the streaming + heartbeat output disappears with it. Either drop the
+  pipe (read JSON from the captured file at the end) or split: redirect stderr
+  to its own log (`... 2>/tmp/stream.log`) and pipe only stdout.
 - The command form is `nb exec <id> -- <cmd>`: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
 - On official images pip may refuse with PEP 668 — use `pip install --break-system-packages`.
 - Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
-  `exit`; for env changes to persist into an image, `save-image` after.
+  `exit`; for env changes to persist into an image, `save-image` after. For
+  truly long-running commands (hours), detach to a GPFS logfile and poll it
+  with cheap follow-up `nb exec -- tail` calls — `--stream` is not for hour-long
+  jobs (the timeout would kill it).
 
 ### `nb save-image NOTEBOOK_ID --name N --version V`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks

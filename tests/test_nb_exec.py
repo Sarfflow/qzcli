@@ -28,11 +28,9 @@ def test_strip_ansi_removes_csi_and_osc():
     assert notebook._strip_ansi(s) == "helloworld\n"
 
 
-def test_extract_between_isolates_stdout():
+def test_extractor_isolates_stdout_and_exit_code():
     nonce = "QZX185c38ac1"
     end_re = re.compile(rf"{nonce}EXIT(-?\d+)END")
-    # what a real PTY capture looks like: banner, prompt+echo (one line, has
-    # nonce), then the two output markers wrapping the command's stdout.
     captured = (
         "welcome banner line\n"
         f"[root:host]$ echo {nonce}START; echo HELLO; uname -sm; echo {nonce}EXIT$?END\n"
@@ -42,10 +40,37 @@ def test_extract_between_isolates_stdout():
         f"{nonce}EXIT0END\n"
         "[root:host]$ "
     )
-    out = notebook._extract_between(captured, f"{nonce}START", end_re)
-    assert out == "HELLO\nLinux x86_64"
+    e = notebook._Extractor(f"{nonce}START", end_re)
+    e.feed(captured)
+    assert e.done
+    assert e.exit_code == 0
+    assert e.stdout == "HELLO\nLinux x86_64"
 
 
-def test_extract_between_empty_when_no_start_marker():
+def test_extractor_handles_chunked_feed_and_streams_each_line():
+    nonce = "QZX42"
+    end_re = re.compile(rf"{nonce}EXIT(-?\d+)END")
+    streamed: list[str] = []
+    e = notebook._Extractor(f"{nonce}START", end_re, on_line=streamed.append)
+    # arbitrarily-split chunks: partial lines, multi-line, etc.
+    for chunk in [
+        f"[root:host]$ echo {nonce}START; cmd; echo {nonce}EXIT$?END\n",
+        f"{nonce}START\nlin",  # split mid-line
+        "e1\nline2\n",
+        f"line3\n{nonce}EXIT7END\ntrailing prompt",
+    ]:
+        e.feed(chunk)
+    assert e.done
+    assert e.exit_code == 7
+    # streamed lines arrive in order, no markers, no PTY-echo line:
+    assert streamed == ["line1", "line2", "line3"]
+    assert e.stdout == "line1\nline2\nline3"
+
+
+def test_extractor_empty_when_no_start_marker():
     end_re = re.compile(r"QZXxEXIT(-?\d+)END")
-    assert notebook._extract_between("just banner\nno markers\n", "QZXxSTART", end_re) == ""
+    e = notebook._Extractor("QZXxSTART", end_re)
+    e.feed("just banner\nno markers\n")
+    assert not e.done
+    assert e.exit_code is None
+    assert e.stdout == ""

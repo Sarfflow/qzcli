@@ -13,7 +13,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..client import endpoints
 from ..client.http import Client
@@ -407,11 +407,15 @@ def exec_command(
     *,
     timeout: int = 120,
     strip_ansi: bool = True,
+    stream: bool = False,
 ) -> dict[str, Any]:
     """Run ``command`` inside a running notebook; return stdout + exit code.
 
     Drives the notebook's JupyterLab terminal over its WebSocket. ``timeout`` is
-    the overall wall-clock budget for the command to finish.
+    the overall wall-clock budget for the command to finish. With ``stream=True``,
+    each real-stdout line (filtered of PTY echo + START/END markers) is also
+    written to sys.stderr the moment it arrives — combined with `run_in_background`
+    + the harness's per-line stream notifications, this gives an ssh-tail UX.
     """
     try:
         from websocket import (
@@ -442,25 +446,24 @@ def exec_command(
     start_mark, end_re = f"{nonce}START", re.compile(rf"{nonce}EXIT(-?\d+)END")
     wrapped = f"echo {start_mark}; {command}; echo {nonce}EXIT$?END"
 
+    def _stream_sink(line: str) -> None:
+        import sys
+        print(line, file=sys.stderr, flush=True)
+
+    extractor = _Extractor(start_mark, end_re, on_line=_stream_sink if stream else None)
     deadline = time.monotonic() + timeout
-    buf: list[str] = []
-    exit_code: Optional[int] = None
+    buf_raw: list[str] = []  # for `strip_ansi=False` (returns the unprocessed terminal text)
     try:
         ws = create_connection(
             ws_url, header=[f"Authorization: token {token}"],
             timeout=5, max_size=None, enable_multithread=True,
         )
         try:
-            # Drain the welcome banner until the shell goes idle (= ready).
-            idle_until = time.monotonic() + 0.8
-            while time.monotonic() < idle_until and time.monotonic() < deadline:
-                try:
-                    _recv_stdout(ws)
-                    idle_until = time.monotonic() + 0.8
-                except WebSocketTimeoutException:
-                    break
-                except (WebSocketConnectionClosedException, OSError):
-                    break
+            # Send immediately — bash buffers our input on the PTY until rc/banner
+            # finish, then executes it; the _Extractor's `pre` state silently
+            # absorbs the banner output until our START marker shows up. The
+            # explicit drain loop here used to add ~5s of wall clock (its `recv`
+            # waited a full ws socket timeout after the last banner chunk).
             ws.send(json.dumps(["stdin", wrapped + "\n"]))
             while time.monotonic() < deadline:
                 try:
@@ -471,10 +474,9 @@ def exec_command(
                     break  # shell/terminal closed (e.g. command ran `exit`)
                 if chunk is None:
                     continue
-                buf.append(chunk)
-                m = end_re.search(_strip_ansi("".join(buf)))
-                if m:
-                    exit_code = int(m.group(1))
+                buf_raw.append(chunk)
+                extractor.feed(_strip_ansi(chunk))
+                if extractor.done:
                     break
         finally:
             try:
@@ -484,14 +486,11 @@ def exec_command(
     finally:
         endpoints.delete_terminal(base, token, name)
 
-    raw = _strip_ansi("".join(buf))
-    stdout = _extract_between(raw, start_mark, end_re)
-    timed_out = exit_code is None
     return {
         "notebook_id": notebook_id,
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "stdout": stdout if strip_ansi else "".join(buf),
+        "exit_code": extractor.exit_code,
+        "timed_out": extractor.exit_code is None,
+        "stdout": extractor.stdout if strip_ansi else "".join(buf_raw),
     }
 
 
@@ -509,23 +508,62 @@ def _recv_stdout(ws) -> Optional[str]:
     return None
 
 
-def _extract_between(text: str, start_mark: str, end_re: re.Pattern) -> str:
-    """Return the lines between the START output marker and the END marker.
+class _Extractor:
+    """Line-based state machine for nb exec output.
 
-    The wrapped command is one shell line, so between the two output markers
-    there is no prompt or input echo — just the command's own output.
+    Feed ANSI-stripped terminal chunks (any shape — partial lines, multi-line,
+    interleaved) via :meth:`feed`. Transitions:
+
+    - ``pre``  → ``body`` once the output line ``{NONCE}START`` is seen
+                 (the wrapped command's first echo). Input-echo lines like
+                 ``echo {NONCE}START; …`` have an ``echo `` prefix, so they
+                 don't false-trigger.
+    - ``body`` → ``done`` once a line matches ``{NONCE}EXIT(\\d+)END``; the
+                 captured int becomes :attr:`exit_code`.
+
+    In ``body`` state, each non-marker line is appended to :attr:`body_lines`
+    AND emitted to ``on_line`` (if supplied) — that's the streaming sink, so
+    ``--stream`` can write each line to stderr the moment it arrives.
     """
-    lines = text.split("\n")
-    out: list[str] = []
-    capturing = False
-    for ln in lines:
-        if not capturing:
-            # the *output* marker is the line equal to start_mark (not the
-            # echoed `echo ...START` input line, which has the `echo ` prefix)
-            if ln.strip() == start_mark:
-                capturing = True
-            continue
-        if end_re.search(ln):
-            break
-        out.append(ln)
-    return "\n".join(out).strip("\n")
+
+    def __init__(self, start_mark: str, end_re: re.Pattern, *,
+                 on_line: Optional[Callable[[str], None]] = None) -> None:
+        self.start_mark = start_mark
+        self.end_re = end_re
+        self.on_line = on_line
+        self._pending = ""
+        self._state = "pre"
+        self.body_lines: list[str] = []
+        self.exit_code: Optional[int] = None
+
+    def feed(self, text: str) -> None:
+        if self._state == "done":
+            return
+        self._pending += text
+        parts = self._pending.split("\n")
+        self._pending = parts[-1]  # last is incomplete-so-far
+        for line in parts[:-1]:
+            self._handle(line)
+
+    def _handle(self, line: str) -> None:
+        if self._state == "pre":
+            if line.strip() == self.start_mark:
+                self._state = "body"
+            return
+        # body
+        m = self.end_re.search(line)
+        if m:
+            self.exit_code = int(m.group(1))
+            self._state = "done"
+            return
+        self.body_lines.append(line)
+        if self.on_line is not None:
+            self.on_line(line)
+
+    @property
+    def done(self) -> bool:
+        return self._state == "done"
+
+    @property
+    def stdout(self) -> str:
+        return "\n".join(self.body_lines)

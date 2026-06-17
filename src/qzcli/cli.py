@@ -329,7 +329,7 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
             )
         return notebook_core.exec_command(
             client, args.notebook_id, cmd,
-            timeout=args.timeout, strip_ansi=not args.raw,
+            timeout=args.timeout, strip_ansi=not args.raw, stream=args.stream,
         ), None
     raise QzError(f"未知 nb 目标: {args.nb_target}", code="usage_error")
 
@@ -668,6 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--timeout", type=int, default=120, help="整体超时秒数（默认 120）")
     n.add_argument("--raw", action="store_true",
                    help="返回原始终端输出（保留 ANSI/banner，不裁剪）")
+    n.add_argument("--stream", action="store_true",
+                   help="实时把每行 stdout 打到 stderr（配合 shell 后台运行 = ssh-tail UX）")
     n.set_defaults(func=cmd_nb)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")
