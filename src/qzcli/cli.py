@@ -24,6 +24,7 @@ from .core import create as create_core
 from .core import notebook as notebook_core
 from .core import options as options_core
 from .core import wait as wait_core
+from .core import whoami as whoami_core
 from .errors import QzError
 
 
@@ -125,6 +126,13 @@ def cmd_login(args) -> tuple[Any, Optional[list[str]]]:
         config.save_cookie(cookie, args.workspace)
     return {"status": "logged in", "cookie_len": len(cookie),
             "workspace_id": args.workspace or ""}, None
+
+
+def cmd_whoami(args) -> tuple[Any, Optional[list[str]]]:
+    """Self-inspection. No API call — pure env-var parse so an agent inside a
+    notebook/training pod (where there is usually no saved cookie) can still
+    learn its own identity."""
+    return whoami_core.inspect(), None
 
 
 def cmd_projects(args) -> tuple[Any, Optional[list[str]]]:
@@ -558,6 +566,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cookie", help="直接保存浏览器导出的 cookie（验证码场景）")
     sp.add_argument("-w", "--workspace", help="默认工作空间 id")
     sp.set_defaults(func=cmd_login)
+
+    sp = sub.add_parser("whoami", help="自检：是否在启智容器内；解析自身 job/notebook/project 身份")
+    sp.set_defaults(func=cmd_whoami)
 
     sp = sub.add_parser("projects", help="项目→空间 层级（带 priority_cap；--with-gpu 加空间→GPU 型号）")
     sp.add_argument("--with-gpu", dest="with_gpu", action="store_true",

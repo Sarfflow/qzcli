@@ -55,6 +55,17 @@ Credentials also read from `QZCLI_USERNAME` / `QZCLI_PASSWORD`. On captcha, log
 in via browser and pass the exported cookie with `--cookie`.
 → `data: {status, cookie_len, workspace_id}`
 
+### `whoami`
+→ `data: {in_qz_container: bool, hostname, kind?, server_type?, workspace_id?, project_id?, project_en_name?, user_id?, notebook_id?, job_id?, jupyter_token?, jupyter_url?, gpfs?: {...}, dist?: {...}}`
+Self-inspection. **No API call** — pure env-var parse so an agent running INSIDE
+a notebook or training pod (where there is typically no saved cookie) can still
+learn its own identity. Sources: `NB_PREFIX` carries `{ws_id, project_id, user_id,
+notebook_id, jupyter_token}` in one string; `INSPIRE_PROJECT_USER_*` GPFS paths
+give the project's en_name; pytorch `RANK`/`WORLD_SIZE` + a `job-<uuid>` substring
+in the pod's hostname identify a training pod. **Run it on the control machine**
+and it returns `{in_qz_container: false}` — useful to confirm you're on the
+driver side, not in a pod.
+
 ### `projects [--with-gpu]`
 → `data: [ {id: "project-...", name, en_name, priority_cap, spaces: [{id: "ws-...", name [, gpu_types]}]} ]`
 `priority_cap` is the per-project max for `--priority` (so `create` validates up
@@ -183,10 +194,18 @@ usually 0.)
 
 A *notebook* is a long-lived dev container (启智 "交互式建模"): start one on a 机房,
 work in it (configure env, smoke-test), save it as a personal image, stop it —
-then `create` distributed training from that image. Same GPFS as your other
-instances in the project, so code is already shared. Read-before-write mirrors
+then `create` distributed training from that image. Read-before-write mirrors
 `create` but on the notebook-specific 机房/specs (interactive-modeling lcgs, DSW
 quotas) and the v2 `notebook` API.
+
+**GPFS scope = per-project.** Containers only see THEIR OWN project's GPFS dirs
+(at `/inspire/<tier>/project/<project_en_name>/...`) — the platform mounts only
+those at pod-create time. So: notebook + distributed jobs of the **same project**
+share files at the same paths; an instance in a different project sees a
+different set of mounts (the paths exist but reference that other project).
+`qzcli whoami` (inside a pod) prints the exact mounts; an agent verifying
+"is this file visible to my training job?" should match project_id between the
+notebook that wrote and the job that reads.
 
 **Where to start it (network constraint):** the H100/H200 distributed-training
 clusters are **offline** (no internet). Only **可上网 GPU** can reach the network.
