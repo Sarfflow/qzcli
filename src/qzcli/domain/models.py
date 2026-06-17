@@ -226,6 +226,7 @@ class Image:
     source: str = ""
     visibility: str = ""
     creator: str = ""
+    description: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -237,6 +238,7 @@ class Image:
             source=d.get("source") or d.get("_source", ""),
             visibility=d.get("visibility", ""),
             creator=d.get("creator", ""),
+            description=d.get("description", "") or "",
             raw=d,
         )
 
@@ -248,6 +250,7 @@ class Image:
             "source": self.source,
             "visibility": self.visibility,
             "creator": self.creator,
+            "description": self.description,
         }
 
 

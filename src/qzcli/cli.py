@@ -672,7 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
     n = nsub.add_parser("save-image", help="把运行中的 notebook 存为个人镜像（私有；默认阻塞至 SUCCESS）")
     n.add_argument("notebook_id")
     n.add_argument("--name", required=True,
-                   help="镜像名；CC 保存请用 cc-<base> 前缀以与人工命名区分")
+                   help="镜像名；agent 保存请用 qzcli-<base> 前缀以与人工命名区分")
     g = n.add_mutually_exclusive_group(required=True)
     g.add_argument("--version", help="镜像版本 tag")
     g.add_argument("--auto-version", dest="auto_version", action="store_true",

@@ -235,11 +235,12 @@ the env actually changed (new apt/pip packages, new files in the image layer).
 If you only edited GPFS-resident code, the existing image is still good (code
 is mounted, not baked in).
 
-**Naming convention for agent-saved images:** to distinguish CC-saved snapshots
-from user-named ones, use `--name cc-<base>` (e.g. `cc-posewm`, `cc-mywork`)
-with `--auto-version` (which writes a `YYYYMMDD-HHMMSS` UTC timestamp into
-version). Human-named images are usually `<semantic>:<v1|v2|...>`; the
-`cc-…:<timestamp>` shape is the agent-saved bucket.
+**Naming convention for agent-saved images:** to distinguish agent-saved snapshots
+from user-named ones, use `--name qzcli-<base>` (e.g. `qzcli-posewm`, `qzcli-mywork`)
+with `--auto-version` (which writes a `YYYYMMDD-HHMMSS` UTC timestamp into version).
+The `qzcli-` prefix works for any agent driving via this CLI (CC, Codex, etc.);
+human-named images are usually `<semantic>:<v1|v2|...>`. So the
+`qzcli-…:<timestamp>` shape is the agent-saved bucket.
 
 ### `nb ls -w <ws>`
 → `data: [ {name, status, room, gpu_count, gpu_ram, image, backup_image, notebook_id, ...} ]`
@@ -328,11 +329,12 @@ Can't stop the notebook while a save is BUILDING.
 - **When to call:** only when the env actually changed (apt/pip/config). If
   you only edited code on GPFS, the existing image is fine — code is mounted,
   not baked in.
-- **Naming (CC convention):** use `--name cc-<base>` + `--auto-version`
+- **Naming (agent convention):** use `--name qzcli-<base>` + `--auto-version`
   (`--auto-version` writes UTC `YYYYMMDD-HHMMSS` into version), so agent-saved
-  images form a distinct `cc-<base>:<timestamp>` namespace separate from
+  images form a distinct `qzcli-<base>:<timestamp>` namespace separate from
   human-named `<semantic>:<v1|v2|...>` ones. Manual `--version V` still works
-  for one-off names.
+  for one-off names. The `qzcli-` prefix is the convention regardless of which
+  agent drives (CC, Codex, etc.).
 
 ### `nb stop NOTEBOOK_ID`
 → `data: {stopped, result, wait}`. Blocks until STOPPED by default.
