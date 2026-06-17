@@ -172,9 +172,12 @@ recent. Startup `Unschedulable` warnings are normal transient noise.
 → `data: {...}` (full job detail — a large object: status, project_name,
 framework, gpu_count, instances, node_infos, framework_config, timeline, envs, …
 — the exact key set is richer than a fixed schema). `--brief` returns just
-`{job_id, name, status, project_name, framework, gpu_count, logic_compute_group_name,
-task_priority, created_at, finished_at}` — the quick way to check one job's status
-without scanning `ls` or dumping the full object.
+`{job_id, name, status, project_name, framework, gpu_count, node_count,
+logic_compute_group_name, priority_name, priority_level, created_at,
+finished_at, running_time_ms}` — the quick way to check one job's status without
+scanning `ls` or dumping the full object. (`priority_name` is the numeric task
+priority you submitted with; ignore the internal `task_priority`, which is
+usually 0.)
 
 ## Interactive modeling — `nb ...` (notebook)
 
@@ -217,6 +220,10 @@ adds a `wait:{final_status,reached,timed_out,active_s,queued_s}` block. Run them
 with the shell backgrounded to spend zero tokens while waiting. While blocking,
 a heartbeat line is written to **stderr** every ~30s (status + elapsed; queue
 time flagged) so a watcher sees progress — the stdout JSON result is unaffected.
+After `nb start` reaches RUNNING it also probes the JupyterLab gateway until
+`/api/me` returns 200 (the platform's RUNNING signal can precede the gateway
+being routable by ~30s), so the next `nb exec` doesn't hit a 503. Result has
+`wait.jupyter_ready` (true/false).
 
 ### `nb start --name N -w <ws> -g <lcg> --image ADDR [--dry-run]`
 Options: `--project` (multi-project ws), `--quota-id` (from `nb specs`),
@@ -253,6 +260,11 @@ deps, and smoke-test before `save-image`.
   to its own log (`... 2>/tmp/stream.log`) and pipe only stdout.
 - The command form is `nb exec <id> -- <cmd>`: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
 - On official images pip may refuse with PEP 668 — use `pip install --break-system-packages`.
+- apt's "games" packages (e.g. `cowsay`, `sl`, `fortune`) install to `/usr/games/`,
+  which is **not on the default non-interactive PATH** — `which cowsay` will say
+  it's missing even after apt-get succeeded. Either invoke with the full path
+  (`/usr/games/cowsay`) or pick a different demo package (`htop`, `jq`, `tree`)
+  for env-verification commands.
 - Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
   `exit`; for env changes to persist into an image, `save-image` after. For
   **commands that might exceed `--timeout`** (long inference, big data downloads,

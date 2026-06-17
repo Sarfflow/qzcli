@@ -451,8 +451,12 @@ def cmd_events(args) -> tuple[Any, Optional[list[str]]]:
 
 
 _DETAIL_BRIEF_KEYS = [
-    "job_id", "name", "status", "project_name", "framework", "gpu_count",
-    "logic_compute_group_name", "task_priority", "created_at", "finished_at",
+    "job_id", "name", "status", "project_name", "framework",
+    "gpu_count", "node_count", "logic_compute_group_name",
+    # `task_priority` is an internal field that's often 0; the user-facing
+    # priority you submitted with is `priority_name` (numeric string).
+    "priority_name", "priority_level",
+    "created_at", "finished_at", "running_time_ms",
 ]
 
 

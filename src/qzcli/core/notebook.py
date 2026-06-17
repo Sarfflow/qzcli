@@ -31,6 +31,37 @@ def _save_status(client: Client, notebook_id: str) -> str:
     nb = endpoints.get_notebook(client, notebook_id)
     return (nb.get("save_mirror_status") or {}).get("status") or ""
 
+
+def _probe_jupyter_ready(
+    client: Client, notebook_id: str, *, timeout_s: float = 30.0,
+) -> tuple[bool, Optional[int]]:
+    """After the platform says RUNNING the JupyterLab gateway can still 5xx/404
+    for a few seconds (the pod is up but its ingress isn't routable yet). Probe
+    ``GET {base}/api/me`` until it returns 200, then we know the next ``nb exec``
+    will work. Returns ``(ready, last_http_status)``.
+    """
+    import requests
+    try:
+        base, token = endpoints.resolve_jupyter(client, notebook_id)
+    except QzError:
+        return False, None
+    s = endpoints._gateway_session()
+    headers = {"Authorization": f"token {token}"}
+    deadline = time.monotonic() + timeout_s
+    delay = 1.0
+    last: Optional[int] = None
+    while time.monotonic() < deadline:
+        try:
+            r = s.get(f"{base}/api/me", headers=headers, timeout=5)
+            last = r.status_code
+            if r.status_code == 200:
+                return True, 200
+        except requests.RequestException:
+            pass
+        time.sleep(delay)
+        delay = min(delay * 1.5, 4.0)
+    return False, last
+
 # Defaults observed in the web CreateNotebook payload.
 DEFAULT_RUNTIME = "standard"
 DEFAULT_PRIORITY = 6
@@ -332,6 +363,14 @@ def start(client: Client, req: NotebookStartRequest, *, dry_run: bool = False,
                 code="notebook_failed",
                 hint=f"查看原因: qzcli nb get {nid}",
             )
+        if w["reached"]:
+            # The platform's RUNNING signal precedes the JupyterLab gateway
+            # being routable by a few seconds — block until /api/me returns 200
+            # so the caller's first `nb exec` doesn't trip a 503/404.
+            ready, last = _probe_jupyter_ready(client, nid)
+            w["jupyter_ready"] = ready
+            if not ready:
+                w["jupyter_probe_last_status"] = last
     return out
 
 
