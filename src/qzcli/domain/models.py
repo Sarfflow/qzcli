@@ -12,7 +12,7 @@ Each model keeps the original ``raw`` dict so nothing is lost, and exposes a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 
 def _to_int(value: Any) -> int:
@@ -40,21 +40,32 @@ class Space:
 
 @dataclass
 class Project:
-    """A project (``project-...``) and the spaces it owns."""
+    """A project (``project-...``) and the spaces it owns.
+
+    ``priority_cap`` is the platform's per-project max for ``task_priority``
+    (numeric form of ``priority_name``). ``None`` if not exposed by the source
+    endpoint — then the server-side check at submit-time is the backstop.
+    """
 
     id: str
     name: str
     en_name: str
     spaces: list[Space] = field(default_factory=list)
+    priority_cap: Optional[int] = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_api(cls, d: dict[str, Any]) -> "Project":
+        try:
+            cap = int(d.get("priority_name")) if d.get("priority_name") else None
+        except (TypeError, ValueError):
+            cap = None
         return cls(
             id=d.get("id", ""),
             name=d.get("name", ""),
             en_name=d.get("en_name", ""),
             spaces=[Space.from_api(s) for s in (d.get("space_list") or [])],
+            priority_cap=cap,
             raw=d,
         )
 
@@ -63,6 +74,7 @@ class Project:
             "id": self.id,
             "name": self.name,
             "en_name": self.en_name,
+            "priority_cap": self.priority_cap,
             "spaces": [s.to_dict() for s in self.spaces],
         }
 
@@ -100,7 +112,7 @@ class ComputeGroup:
         resolved without guessing.
         """
         rts = lcg.get("resource_types") or []
-        gpu = gpu_info_by_type.get(rts[0], {}) if rts else {}
+        gpu = (gpu_info_by_type.get(rts[0]) or {}) if rts else {}
         return cls(
             id=lcg.get("logic_compute_group_id", ""),
             name=lcg.get("logic_compute_group_name", ""),

@@ -55,8 +55,12 @@ Credentials also read from `QZCLI_USERNAME` / `QZCLI_PASSWORD`. On captcha, log
 in via browser and pass the exported cookie with `--cookie`.
 → `data: {status, cookie_len, workspace_id}`
 
-### `projects`
-→ `data: [ {id: "project-...", name, en_name, spaces: [{id: "ws-...", name}]} ]`
+### `projects [--with-gpu]`
+→ `data: [ {id: "project-...", name, en_name, priority_cap, spaces: [{id: "ws-...", name [, gpu_types]}]} ]`
+`priority_cap` is the per-project max for `--priority` (so `create` validates up
+front). `--with-gpu` annotates each space with `gpu_types` (e.g. `["4090"]`,
+`["H100","H200"]`) — opt-in because it costs one extra call per unique space;
+once per session you have the whole platform meta in one shot.
 
 ### `options compute-groups -w <ws>`
 → `data: [ {id: "lcg-...", name, workspace_id, gpu_type, gpu_type_display} ]`
@@ -102,7 +106,11 @@ Options: `--project` (id / 中文名 / en_name), `--quota-id`, `--cpu`, `--gpu`,
 `--instances` (default 1), `--shm` GiB (default: spec memory), `--priority` 1–10
 (default 10; a project caps this — `--dry-run`/submit fail fast with `priority_too_high`
 naming the exact cap, so set `--priority <= cap`), `--no-image-check`,
-`--dataset id[:version]` (repeatable), `--wait/--no-wait`, `--timeout`.
+`--dataset id[:version]` (repeatable), `--wait/--no-wait`, `--timeout`, `--allow-set-e`.
+`--cmd` containing `set -e` (or `set -eu` etc.) is **rejected** by default
+(`set_e_footgun`) because any benign non-zero (empty glob, `grep` no match, `[ ]`
+false) would abort the whole job with exitCode 2 — either drop `set -e` and
+guard risky steps with `|| true`, or pass `--allow-set-e` to keep it.
 - **Blocks until the job is running by default** (qzcli polls; queue time is not
   charged against `--timeout`, default 600s). Adds `wait:{final_status,reached,
   timed_out,active_s,queued_s}`. `--no-wait` returns at submit. Run long ones with
@@ -269,7 +277,8 @@ directly, or a name/address plus `-w <ws>` to resolve it.
 | `invalid_notebook` / `invalid_notebook_state` | bad notebook id, or wrong status for the op | `qzcli nb ls`; save/exec need RUNNING, rm needs STOPPED |
 | `notebook_exec_failed` | notebook gateway rejected the terminal/exec | confirm `nb get` status=RUNNING; retry |
 | `notebook_failed` / `job_failed` / `save_image_failed` | resource reached a failure state while waiting | `nb get` / `logs` / `events` for the cause |
-| `priority_too_high` | `--priority` exceeds the project's cap | retry with a lower `--priority` |
+| `priority_too_high` | `--priority` exceeds the project's cap | retry with a lower `--priority` (cap is on the project) |
+| `set_e_footgun` | `--cmd` contains `set -e` | drop it (and guard risky steps with `\|\| true`), or pass `--allow-set-e` |
 | `invalid_job` | bad/unknown JOB_ID | `qzcli ls -w <ws>` for valid ids |
 | `no_instances` | job has no scheduled pods yet | `qzcli instances <job_id>` / wait |
 | `no_specs` / `no_compute_groups` / `no_workspaces` | nothing available | see `hint` |

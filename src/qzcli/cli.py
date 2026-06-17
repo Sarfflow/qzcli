@@ -128,8 +128,24 @@ def cmd_login(args) -> tuple[Any, Optional[list[str]]]:
 
 
 def cmd_projects(args) -> tuple[Any, Optional[list[str]]]:
-    projects = endpoints.list_projects(_client())
-    return [p.to_dict() for p in projects], None
+    client = _client()
+    rows = [p.to_dict() for p in endpoints.list_projects(client)]
+    if getattr(args, "with_gpu", False):
+        # space→gpu_types is platform meta; not a single API, but cheap if you
+        # query each unique space's compute-groups once. Opt-in to keep the
+        # default `projects` a single call.
+        unique_spaces = {s["id"] for r in rows for s in r["spaces"] if s.get("id")}
+        gpu_by_ws: dict[str, list[str]] = {}
+        for ws_id in unique_spaces:
+            try:
+                cgs = endpoints.list_compute_groups(client, ws_id)
+                gpu_by_ws[ws_id] = sorted({cg.gpu_type for cg in cgs if cg.gpu_type})
+            except QzError:
+                gpu_by_ws[ws_id] = []
+        for r in rows:
+            for s in r["spaces"]:
+                s["gpu_types"] = gpu_by_ws.get(s.get("id", ""), [])
+    return rows, None
 
 
 def cmd_options(args) -> tuple[Any, Optional[list[str]]]:
@@ -357,6 +373,7 @@ def cmd_create(args) -> tuple[Any, Optional[list[str]]]:
         priority=args.priority,
         check_image=not args.no_image_check,
         datasets=args.dataset or [],
+        allow_set_e=args.allow_set_e,
     )
     if args.dry_run:
         return create_core.dry_run(client, req), None
@@ -538,7 +555,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-w", "--workspace", help="默认工作空间 id")
     sp.set_defaults(func=cmd_login)
 
-    sp = sub.add_parser("projects", help="项目→空间 层级（不压平）")
+    sp = sub.add_parser("projects", help="项目→空间 层级（带 priority_cap；--with-gpu 加空间→GPU 型号）")
+    sp.add_argument("--with-gpu", dest="with_gpu", action="store_true",
+                    help="为每个 space 注入 gpu_types（每个空间多一次 compute-groups 查询）")
     sp.set_defaults(func=cmd_projects)
 
     sp = sub.add_parser("options", help="枚举某一级的合法候选")
@@ -676,6 +695,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="挂载数据集 dataset_id 或 dataset_id:version_id，可重复（提交前自动校验）")
     sp.add_argument("--dry-run", action="store_true",
                     help="只校验+预览 payload，不提交")
+    sp.add_argument("--allow-set-e", dest="allow_set_e", action="store_true",
+                    help="保留 --cmd 里的 `set -e`（默认被拦截，避免无害非零让整 job 失败）")
     _add_wait_flags(sp)  # default: block until job_running (queue not counted)
     sp.set_defaults(func=cmd_create)
 

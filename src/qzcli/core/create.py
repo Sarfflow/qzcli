@@ -14,6 +14,7 @@ bypass the read.
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -29,6 +30,11 @@ DEFAULT_IMAGE_TYPE = "SOURCE_PRIVATE"
 DEFAULT_INSTANCES = 1
 DEFAULT_SHM = 1200
 DEFAULT_PRIORITY = 10
+
+# Matches `set -e`, `set -eu`, `set -euxo pipefail`, etc. — any `set -…e…` flag
+# combination — bounded by start / whitespace / shell separators / brace / paren
+# / quote (the `bash -lc 'set -e; …'` form is the common case in real --cmd).
+_SET_E_RE = re.compile(r"""(?:^|[\s;&|({'"])set\s+-[A-Za-z]*e[A-Za-z]*\b""")
 
 
 @dataclass
@@ -50,6 +56,7 @@ class CreateRequest:
     priority: int = DEFAULT_PRIORITY
     check_image: bool = True
     datasets: list[str] = field(default_factory=list)  # "id" or "id:version" specs
+    allow_set_e: bool = False  # opt-in to keep `set -e` in --cmd despite the footgun
 
 
 def _resource_spec_price(spec: Spec, compute_group_id: str) -> dict[str, Any]:
@@ -184,6 +191,17 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
         raise QzError(f"--priority 必须在 [1,10]，当前 {req.priority}", code="invalid_value")
     if req.shm is not None and req.shm < 1:
         raise QzError(f"--shm 必须 >= 1 GiB，当前 {req.shm}", code="invalid_value")
+    # shell footgun: `set -e` in --cmd makes any benign non-zero (empty glob,
+    # `grep` with no match, `[ ]` test false) abort the entire job with exitCode
+    # 2 — a costly real-world mistake (we caught one in the multi-agent test).
+    # Refuse it by default; --allow-set-e to opt back in.
+    if _SET_E_RE.search(req.command) and not req.allow_set_e:
+        raise QzError(
+            "--cmd 含 `set -e`：任何无害的非零退出（空 glob、grep 没命中、`[ ]` 为假）"
+            "会让整条命令立即退出，分布式 job 直接 job_failed (exitCode 2)。",
+            code="set_e_footgun",
+            hint="去掉 set -e；或给可能非零的步骤加 `|| true` 守护；确定要保留就 --allow-set-e",
+        )
 
     # 3. resolve hierarchy (raises with candidates on miss).
     #    A space often belongs to MULTIPLE projects. The owning project is a
@@ -221,15 +239,15 @@ def prepare(client: Client, req: CreateRequest) -> dict[str, Any]:
         )
     project_id = project.id
 
-    # 3b. priority cap: a project caps task priority (priority_name). Validate up
-    #     front so --dry-run and submit fail with the real number, not a server
-    #     200006 that hides the cap.
-    cap = endpoints.project_priority_cap(client, project_id)
-    if cap is not None and req.priority > cap:
+    # 3b. priority cap: a project caps task_priority. The cap rides along on
+    #     the Project from list_projects, so no extra API call. Validate here
+    #     so --dry-run and submit fail with the exact number, not a server-side
+    #     200006 that hides it.
+    if project.priority_cap is not None and req.priority > project.priority_cap:
         raise QzError(
-            f"--priority {req.priority} 超过项目 '{project.name}' 的优先级上限 {cap}",
+            f"--priority {req.priority} 超过项目 '{project.name}' 的优先级上限 {project.priority_cap}",
             code="priority_too_high",
-            hint=f"用 --priority <= {cap} 重试",
+            hint=f"用 --priority <= {project.priority_cap} 重试",
         )
 
     cg = options.resolve_compute_group(client, workspace_id, req.compute_group)

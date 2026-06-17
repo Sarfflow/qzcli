@@ -45,13 +45,17 @@ def _ws_referer(client: Client, page: str, workspace_id: str) -> str:
 # --- projects & hierarchy -------------------------------------------------
 
 def list_projects(client: Client) -> list[Project]:
-    """All projects with their owned spaces (``/api/v1/project/list``)."""
+    """All projects with their owned spaces (``/api/v1/project/list_for_page``).
+
+    Uses the *richer* page endpoint so each Project carries ``priority_cap``
+    (= numeric ``priority_name``). Saves a separate cap fetch in create/prepare.
+    """
     data = client.post_api(
-        "project/list",
-        {"page": 1, "page_size": 100, "filter": {}},
+        "project/list_for_page",
+        {"page": 0, "page_size": 200},
         referer=f"{client.base_url}/operations/projects",
     )
-    items = (data or {}).get("items") or []
+    items = (data or {}).get("list") or (data or {}).get("items") or []
     return [Project.from_api(p) for p in items]
 
 
@@ -120,7 +124,7 @@ def list_compute_groups(client: Client, workspace_id: str) -> list[ComputeGroup]
     """
     info = cluster_basic_info(client, workspace_id)
     gpu_info_by_type = {
-        rt.get("resource_type", ""): rt.get("gpu_info", {})
+        rt.get("resource_type", ""): (rt.get("gpu_info") or {})
         for rt in (info.get("resource_types") or [])
     }
     out: list[ComputeGroup] = []
@@ -394,20 +398,15 @@ def find_saved_image(
 
 
 def project_priority_cap(client: Client, project_id: str) -> Optional[int]:
-    """The max task priority a project allows (its numeric ``priority_name``).
+    """Standalone lookup for a project's task-priority cap.
 
-    ``create`` rejects ``task_priority > project priority`` server-side (code
-    200006) without naming the cap; this lets us surface it. Returns None if it
-    can't be determined (then the server check remains the backstop).
+    Most callers should just read ``Project.priority_cap`` from the
+    :func:`list_projects` result (the cap rides along now). This helper is for
+    code paths that have only an id.
     """
-    data = client.post_api("project/list_for_page", {"page": 0, "page_size": 200}) or {}
-    items = data.get("list") or data.get("items") or []
-    for p in items:
-        if p.get("id") == project_id:
-            try:
-                return int(p.get("priority_name"))
-            except (TypeError, ValueError):
-                return None
+    for p in list_projects(client):
+        if p.id == project_id:
+            return p.priority_cap
     return None
 
 
