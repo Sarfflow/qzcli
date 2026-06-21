@@ -1,114 +1,65 @@
 # qzcli
 
-Agent-first command-line client for the 启智 platform (`qz.sii.edu.cn`), built
-entirely on its reverse-engineered **web API** (`/api/v1/*`, `/api/v2/*`, cookie
-auth). No OpenAPI.
+**简体中文** | [English](README.en.md)
 
-This repository **is** a Claude Code skill — clone it into your skills directory
-and it's ready to use.
+面向 coding agent 的启智平台（`qz.sii.edu.cn`）命令行工具。让在 tmux 里长期运行的
+Claude 自己把「开发 → 调试 → 正式训练」这条循环跑起来。
 
-## Install as a Claude Code skill
+完全基于逆向出来的 **web API**（`/api/v1/*`、`/api/v2/*`，cookie 鉴权），无 OpenAPI。
+本仓库本身就是一个 Claude Code skill——clone 进 skills 目录即可用。
 
-> Instructions for Claude Code: to install this skill, do the following.
+## 工作流
 
-1. Clone this repo into the user's skills directory as `qzcli`:
-   ```bash
-   # user-level (all projects):
-   git clone https://github.com/Sarfflow/qzcli.git ~/.claude/skills/qzcli
-   # or project-level (this project only):
-   git clone https://github.com/Sarfflow/qzcli.git .claude/skills/qzcli
-   ```
-2. Prepare the environment once (installs deps into a local venv):
-   ```bash
-   cd ~/.claude/skills/qzcli && uv sync
-   ```
-   If `uv` is not installed, use `pip install -e ~/.claude/skills/qzcli` instead.
-3. Verify:
-   ```bash
-   ~/.claude/skills/qzcli/qzcli --version
-   ```
+- 在**可联网的 CPU 实例**上让 agent 长期常驻写代码（共享 GPFS，写在哪都一样）；
+- 起 **4090 实例**配环境、跑 smoke test，调通后保存为镜像；
+- 用镜像起**分布式训练**，agent 盯着进展。
 
-The skill is now discoverable via its `SKILL.md`. Invoke the tool through the
-self-locating launcher at the skill root: `~/.claude/skills/qzcli/qzcli <cmd>`
-(works from any directory). See [SKILL.md](SKILL.md) for the full command
-reference, output schemas and the read-before-write workflow.
+GPU 按需占用、用完即关，重计算交给分布式训练——好钢用在刀刃上。
+详见 [工作流文档](docs/工作流.md)。
 
-To update: `git -C ~/.claude/skills/qzcli pull && (cd ~/.claude/skills/qzcli && uv sync)`.
-
-## Design principles
-
-1. **Actionable feedback** — every error says *what* is wrong and *what to do
-   next* (`error.code`, `error.hint`, and `error.candidates` listing the
-   currently-legal choices). No silent failures, no bare error codes.
-2. **Read before write** — you enumerate the legal options for each field
-   (`qzcli options ...`) before submitting. `create` runs that read+validation
-   internally and refuses to submit anything that fails, so the read is enforced
-   without a separate step. It never guesses or auto-selects. `create --dry-run`
-   is the optional preview: same validation, submits nothing, shows the resolved
-   payload so you can check the inferred fields before a real job exists.
-3. **No OpenAPI** — only the cookie-authed web API the browser uses.
-4. **Agent-first** — JSON by default (stable `{"ok", "data"|"error"}` envelope);
-   `--table` is the only human view and exposes nothing JSON can't.
-
-## Local development
+## 安装（作为 Claude Code skill）
 
 ```bash
-uv sync            # install deps (requests, PySocks)
-uv run qzcli --help
-uv run pytest -q   # run the test suite
+# 用户级（所有项目可用）：
+git clone https://github.com/Sarfflow/qzcli.git ~/.claude/skills/qzcli
+cd ~/.claude/skills/qzcli && uv sync          # 没有 uv 就用 pip install -e .
+~/.claude/skills/qzcli/qzcli --version         # 验证
 ```
 
-## Quickstart
+通过 skill 根目录的自定位启动器调用：`~/.claude/skills/qzcli/qzcli <cmd>`（任意目录可用）。
+更新：`git -C ~/.claude/skills/qzcli pull && (cd ~/.claude/skills/qzcli && uv sync)`。
+
+## 怎么用
 
 ```bash
-qzcli login -u <学工号> -p <密码>          # or QZCLI_USERNAME / QZCLI_PASSWORD
-qzcli projects                              # project→space hierarchy
-qzcli rooms -w ws-xxx                        # which 机房 (lcg) is emptiest
-qzcli options specs -w ws-xxx -g lcg-yyy     # pick a quota_id
-qzcli options images -w ws-xxx               # pick an image address
+qzcli login -u <学工号> -p <密码>             # 或用 QZCLI_USERNAME / QZCLI_PASSWORD
+qzcli projects                                 # project→space 层级
+qzcli rooms -w ws-xxx                          # 哪个机房（lcg）最空
+qzcli options specs  -w ws-xxx -g lcg-yyy      # 选 quota_id
+qzcli options images -w ws-xxx                 # 选镜像
 qzcli create --name demo -w ws-xxx -g lcg-yyy \
   --quota-id quota-zzz --image docker.sii/...:tag --cmd "python train.py"
-# optional: add --dry-run to the same command first to preview the resolved
-# payload (project / image_type / shm / spec) without creating a job.
-qzcli ls -w ws-xxx --running
+# 先加 --dry-run 可预览解析后的 payload，不真正建任务
+qzcli ls   -w ws-xxx --running
 qzcli logs <job_id> --tail 200
 qzcli stop <job_id>
 ```
 
-See [SKILL.md](SKILL.md) for the full command reference, output schemas and
-error semantics.
+交互式建模实例（GPU 调试）用 `qzcli nb` 系列；完整命令、输出 schema 与
+read-before-write 语义见 **[SKILL.md](SKILL.md)**。
 
-## Layout
+## 设计原则
 
-```
-src/qzcli/
-  cli.py            # argparse dispatch, --table flag, error envelope
-  output.py         # JSON (default) / table rendering
-  config.py         # ~/.qzcli state: config, credentials, cookie
-  errors.py         # QzError → error envelope
-  client/
-    crypto.py       # browser-compatible RSA for the CAS password field
-    cas.py          # CAS→Keycloak login chain (manual redirect walk)
-    http.py         # cookie + browser headers, 401 auto-relogin, /api/v1 + /api/v2
-    endpoints.py    # the only place endpoint paths/payloads live
-  domain/models.py  # Project{spaces}, ComputeGroup, Spec, Image, Job
-  core/
-    options.py      # cascading candidate resolution
-    create.py       # read-before-write job creation
-```
+- **Agent-first**：默认输出 JSON（稳定的 `{"ok", "data"|"error"}` 信封），`--table` 是唯一的人类视图。
+- **Read before write**：先 `qzcli options ...` 枚举合法选项再提交；`create` 内部强制校验，绝不瞎猜或自动选。
+- **可执行的报错**：每个错误都说清*哪里错了*和*下一步怎么办*（`error.code` / `error.hint` / `error.candidates`）。
 
-## Local state
-
-Everything under `~/.qzcli/`: `config.json` (api_base_url, proxy),
-`credentials.json` (for 401 auto-relogin, 0600), `.cookie` (CAS session, 0600).
-Set `QZCLI_NO_AUTO_RELOGIN=1` to disable automatic re-login.
-
-## Tests
+## 本地开发
 
 ```bash
+uv sync && uv run qzcli --help
 uv run pytest -q
 ```
 
-Covers the crypto known-answer vector, option/candidate resolution, and the
-`train_job/create` payload shape (nested `resource_spec_price` + the required
-top-level `cpu`/`mem_gi`/`gpu_count`).
+本地状态都在 `~/.qzcli/`：`config.json`、`credentials.json`（401 自动重登，0600）、
+`.cookie`（CAS 会话，0600）。设 `QZCLI_NO_AUTO_RELOGIN=1` 关闭自动重登。
