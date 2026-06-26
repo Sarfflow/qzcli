@@ -9,6 +9,7 @@ actually acts on, and keep the ids + ssh block needed by other `nb` commands.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -537,6 +538,100 @@ def exec_command(
         "timed_out": extractor.exit_code is None,
         "stdout": extractor.stdout if strip_ansi else "".join(buf_raw),
     }
+
+
+# --- nb exec --detach -----------------------------------------------------
+#
+# A long-running job can't be held open over the terminal: the Jupyter gateway
+# drops the terminal WebSocket after ~10-30 min (instance/load dependent; killing
+# a held `--timeout` command), and it's NOT idle-driven — measured live, a session
+# emitting output every few seconds was dropped just the same, so a keepalive does
+# not help. Plus every `nb exec` tears its terminal down on exit. The fix is to
+# *detach* — launch under `setsid` so the job becomes its own session leader,
+# reparented to the notebook's init. That child is NOT in the terminal's process
+# group, so neither the teardown nor the WebSocket drop reaches it; it lives as
+# long as the notebook pod (verified live: a setsid child kept writing long after
+# its exec session ended). We record pid/log/exit-code under a run dir so the job
+# can be polled and stopped with ordinary `nb exec` calls.
+
+_DETACH_RE = re.compile(r"^QZDETACH (\{.*\})\s*$", re.MULTILINE)
+
+
+def _detach_wrapper(run_id: str, cmd_b64: str, run_root: str) -> str:
+    """Bash that writes the run dir, launches ``cmd`` detached, prints a handle.
+
+    ``cmd`` is passed base64-encoded so arbitrary quoting/newlines survive. The
+    inner ``bash -c '…' "$RUN_DIR"`` uses ``$0`` to carry the run dir into the
+    detached shell without nested-quote gymnastics.
+    """
+    return (
+        f'RUN_DIR="{run_root}/{run_id}"\n'
+        'mkdir -p "$RUN_DIR" || exit 3\n'
+        f'echo {cmd_b64} | base64 -d > "$RUN_DIR/cmd.sh" || exit 3\n'
+        ': > "$RUN_DIR/log"\n'
+        'setsid bash -c \'bash "$0/cmd.sh" >> "$0/log" 2>&1; echo $? > "$0/exit_code"\' '
+        '"$RUN_DIR" </dev/null >/dev/null 2>&1 &\n'
+        'PID=$!\n'
+        'echo "$PID" > "$RUN_DIR/pid"\n'
+        'echo "QZDETACH {\\"run_id\\":\\"' + run_id + '\\",\\"pid\\":$PID,'
+        '\\"run_dir\\":\\"$RUN_DIR\\",\\"log\\":\\"$RUN_DIR/log\\",'
+        '\\"exit_code_file\\":\\"$RUN_DIR/exit_code\\",\\"cmd_file\\":\\"$RUN_DIR/cmd.sh\\"}"\n'
+    )
+
+
+def detach_command(
+    client: Client,
+    notebook_id: str,
+    command: str,
+    *,
+    run_root: str = "$HOME/.qzcli/runs",
+    launch_timeout: int = 60,
+) -> dict[str, Any]:
+    """Launch ``command`` as a detached background job inside the notebook.
+
+    Returns immediately with a handle ``{run_id, pid, log, exit_code_file, ...}``
+    plus ready-to-run ``poll_cmd``/``stop_cmd`` strings. The job keeps running
+    after this call (and after the terminal is torn down) until it finishes, the
+    notebook stops, or it's killed via ``stop_cmd``.
+    """
+    run_id = _new_run_id(notebook_id)
+    cmd_b64 = base64.b64encode(command.encode()).decode()
+    wrapper = _detach_wrapper(run_id, cmd_b64, run_root)
+    wrapper_b64 = base64.b64encode(wrapper.encode()).decode()
+    # Run the wrapper itself base64-encoded so no quoting survives to bite us.
+    launcher = f"echo {wrapper_b64} | base64 -d | bash"
+
+    res = exec_command(client, notebook_id, launcher, timeout=launch_timeout)
+    m = _DETACH_RE.search(res.get("stdout") or "")
+    if not m:
+        raise QzError(
+            "未能启动后台作业（未收到 detach 句柄）",
+            code="notebook_exec_failed",
+            hint=f"终端输出: {(res.get('stdout') or '')[:300]!r}",
+        )
+    handle = json.loads(m.group(1))
+    handle["notebook_id"] = notebook_id
+    handle["detached"] = True
+    log, pid = handle["log"], handle["pid"]
+    ec = handle["exit_code_file"]
+    # Single-quoted args → `nb exec` passes them through verbatim (see cli.py).
+    handle["poll_cmd"] = (
+        f"qzcli nb exec {notebook_id} -- "
+        f"'tail -n 40 {log}; if [ -f {ec} ]; then echo \"--- EXITED code=$(cat {ec})\"; "
+        f"elif kill -0 {pid} 2>/dev/null; then echo \"--- RUNNING pid={pid}\"; "
+        f"else echo \"--- GONE (no exit_code, not running)\"; fi'"
+    )
+    handle["stop_cmd"] = (
+        f"qzcli nb exec {notebook_id} -- "
+        f"'kill -TERM -{pid} 2>/dev/null; sleep 1; kill -KILL -{pid} 2>/dev/null; echo stopped'"
+    )
+    return handle
+
+
+def _new_run_id(notebook_id: str) -> str:
+    """A run id that needs no RNG: notebook prefix + monotonic-ish clock."""
+    stamp = format(int(time.time() * 1000), "x")
+    return f"{re.sub(r'[^0-9a-f]', '', notebook_id)[:8]}-{stamp}"
 
 
 def _recv_stdout(ws) -> Optional[str]:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 import time
 from typing import Any, Optional
@@ -283,6 +284,26 @@ def _parse_fit(spec: Optional[str]) -> Optional[tuple[int, int]]:
         )
 
 
+def _build_exec_command(parts: list[str]) -> str:
+    """Reconstruct the remote shell command from `nb exec ... -- <parts>`.
+
+    Two idioms, kubectl-style:
+      one arg   → a pre-formed shell string, passed through verbatim so any
+                  pipeline/quoting the caller built survives
+                  (`nb exec <id> -- 'a | b && c'`).
+      many args → exec-style argv; shlex.quote each part so grouping is
+                  preserved through the remote shell. Without this, the common
+                  `bash -lc 'script'` idiom collapses to `bash -lc script`,
+                  silently dropping the script body — which is why backgrounded
+                  `setsid`/`nohup` jobs never actually launched (issue #1).
+    """
+    if parts and parts[0] == "--":
+        parts = parts[1:]
+    if len(parts) == 1:
+        return parts[0].strip()
+    return " ".join(shlex.quote(p) for p in parts).strip()
+
+
 def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
     client = _client()
     if args.nb_target == "ls":
@@ -384,15 +405,16 @@ def cmd_nb(args) -> tuple[Any, Optional[list[str]]]:
         res = endpoints.delete_image(client, image_id)
         return {"deleted_image": image_id, "result": res}, None
     if args.nb_target == "exec":
-        cmd_parts = list(args.command or [])
-        if cmd_parts and cmd_parts[0] == "--":
-            cmd_parts = cmd_parts[1:]
-        cmd = " ".join(cmd_parts).strip()
+        cmd = _build_exec_command(args.command or [])
         if not cmd:
             raise QzError(
                 "缺少要执行的命令", code="usage_error",
                 hint='用法: qzcli nb exec <notebook_id> -- <命令>',
             )
+        if args.detach:
+            return notebook_core.detach_command(
+                client, args.notebook_id, cmd,
+            ), None
         return notebook_core.exec_command(
             client, args.notebook_id, cmd,
             timeout=args.timeout, strip_ansi=not args.raw, stream=args.stream,
@@ -875,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="返回原始终端输出（保留 ANSI/banner，不裁剪）")
     n.add_argument("--stream", action="store_true",
                    help="实时把每行 stdout 打到 stderr（配合 shell 后台运行 = ssh-tail UX）")
+    n.add_argument("--detach", action="store_true",
+                   help="后台运行（setsid 脱离终端，存活至 notebook 停止）；立即返回 "
+                        "run_id/pid/log + poll_cmd/stop_cmd，适合数小时的长作业")
     n.set_defaults(func=cmd_nb)
 
     sp = sub.add_parser("create", help="创建任务（--dry-run 先读校验）")

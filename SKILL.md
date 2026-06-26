@@ -318,7 +318,14 @@ deps, and smoke-test before `save-image`.
   EOF and the streaming + heartbeat output disappears with it. Either drop the
   pipe (read JSON from the captured file at the end) or split: redirect stderr
   to its own log (`... 2>/tmp/stream.log`) and pipe only stdout.
-- The command form is `nb exec <id> -- <cmd>`: `nb exec <id> -- pip install -r req.txt && python smoke.py`.
+- The command form is `nb exec <id> -- <cmd>`, kubectl-style, with **two idioms**:
+  - **one quoted arg** = a pre-formed shell string, passed through verbatim, so
+    pipelines/redirs/`&&` you build survive: `nb exec <id> -- 'pip list | grep torch && echo ok'`.
+  - **many args** = exec-style argv, each quote-preserved — so the canonical
+    `nb exec <id> -- bash -lc 'for i in 1 2 3; do echo $i; done'` keeps the script
+    intact. (Before, args were naively space-joined, collapsing `bash -lc 'script'`
+    to `bash -lc script` and silently dropping the body — which broke every
+    backgrounded `setsid`/`nohup` job. Fixed.)
 - On official images pip may refuse with PEP 668 — use `pip install --break-system-packages`.
 - apt's "games" packages (e.g. `cowsay`, `sl`, `fortune`) install to `/usr/games/`,
   which is **not on the default non-interactive PATH** — `which cowsay` will say
@@ -326,17 +333,32 @@ deps, and smoke-test before `save-image`.
   (`/usr/games/cowsay`) or pick a different demo package (`htop`, `jq`, `tree`)
   for env-verification commands.
 - Each call is a fresh shell (`/inspire/.../<user>` home, GPFS shared). Don't run
-  `exit`; for env changes to persist into an image, `save-image` after. For
-  **commands that might exceed `--timeout`** (long inference, big data downloads,
-  hour-scale jobs), don't `--stream` them — the timeout WILL kill the terminal
-  and the command with it. Detach to a GPFS logfile instead:
+  `exit`; for env changes to persist into an image, `save-image` after.
+- **Long jobs (anything that might exceed `--timeout`): use `--detach`.** A held
+  `nb exec --timeout N` does **not** hold arbitrarily long — the Jupyter gateway
+  drops the terminal after ~10–30 min (instance/load dependent) and the command
+  dies with it, regardless of N. It's not idle-driven, so emitting output won't
+  save it (measured live). Don't babysit hour-scale jobs over a held session.
+
+### `nb exec --detach NOTEBOOK_ID -- <command>`
+Launch `<command>` as a **detached** background job and return immediately. The
+job runs under `setsid`, so it's its own session leader (not in the terminal's
+process group) and survives both the per-call terminal teardown and the ~30-min
+idle cull — it lives until it finishes, the notebook stops, or you stop it.
+Verified live: `setsid` children keep running long after the exec session ends.
+- → `data: {run_id, pid, run_dir, log, exit_code_file, cmd_file, poll_cmd, stop_cmd}`.
+  stdout+stderr stream to `log`; the job's exit code lands in `exit_code_file`
+  when it ends. `run_dir` defaults to `~/.qzcli/runs/<run_id>`.
+- **Poll** with the returned `poll_cmd` (tails the log + reports RUNNING/EXITED):
   ```
-  nb exec <id> -- 'setsid bash -c "python video_infer.py > ~/run.log 2>&1" & echo pid=$!'
-  nb exec <id> -- 'tail -n 50 ~/run.log; kill -0 <pid> && echo RUNNING || echo DONE'
+  qzcli nb exec --detach <id> -- bash -lc 'python video_infer.py'   # → handle
+  <run the printed poll_cmd>     # cheap, repeat to watch progress
+  <run the printed stop_cmd>     # kills the whole process group
   ```
-  `setsid`/`nohup &` detaches from the PTY so terminal teardown doesn't kill it;
-  poll the log with cheap follow-up `tail` calls. For truly multi-hour training,
-  use `create` (distributed) instead — it has proper logs/events/metrics.
+  Combine `poll_cmd` with `run_in_background` + a Monitor for a hands-off watch.
+- For truly multi-hour distributed training, use `create` instead — it has proper
+  logs/events/metrics. `--detach` is the right tool for single-notebook hour-scale
+  CPU/GPU jobs (e.g. depth-extract QR) that the interactive lane is sanctioned for.
 
 ### `nb save-image NOTEBOOK_ID --name N (--version V | --auto-version) [--description TEXT]`
 Save a **RUNNING** notebook as a private personal image (`accessible=1`). Blocks
